@@ -1,345 +1,332 @@
 import os
 import surfa as sf
 import numpy as np
+import functools
+import time
+
+#from scipy.sparse import coo_matrix
 
 import torch
 import torch.nn as nn
-from torch.nn.utils.rnn import pad_sequence as pad_seq
+from torch.nn.utils.rnn import pad_sequence
 
+import utils
+
+eps = 1e-8
+
+#---------------------------------------------------------------------------------------------------
 
 class TensorMesh:
-    def __init__(self, mesh, device=None):
+    def __init__(
+            self,
+            mesh,
+            device=None,
+            compute_proximity_tree=True,
+            compute_curvature=True,
+            compute_curvature_residuals=True,
+            compute_repulsion_energy=True,
+            compute_spring_energy=True,
+            verts_requires_grad=False,
+            proximity_ratio=0.1
+    ):
+        """
+        Triangular mesh topology represented by tensors of vertices and faces. This class is based
+        almost entirely on surfa.mesh, but with tensors instead of numpy arrays for gpu support.
+        """
+        
         # Store data from mesh
-        self.verts = torch.tensor(mesh.vertices)
+        self.mesh = mesh
+        self.verts = torch.tensor(mesh.vertices, dtype=torch.double)
         self.tris = torch.tensor(mesh.faces)
-        self.vnorms = torch.tensor(mesh.vertex_normals)
 
         self.nverts = len(mesh.vertices)
         self.ntris = len(mesh.faces)
-        self.ndims = self.vnorms.shape[1]
+        self.ndims = self.verts.shape[1]
         self.geom = mesh.geom
-    
-        # Compile list of triangles for each vertex
-        tri_nbrs_1hop, vert_tri_inds = list(
-            map(list, zip(*[torch.where(self.tris==p) for p in range(self.nverts)]))
+                
+        # Get triangles containing each vertex
+        self._compute_vert_tris()
+        
+        # Get one-/two-hop neighbors for each vertex
+        self._compute_neighbors()
+
+        # Get LUT for each vertex containing non-neighbors within a min distance
+        if compute_proximity_tree:
+            self.proximity_ratio = proximity_ratio
+            self._compute_proximity_trees()
+        else:
+            self.vert_proximity = None
+
+        # Set everything to correct device and compute vertex properties
+        self._set_device(device, verts_requires_grad=verts_requires_grad)
+        self._update_vert_properties()
+
+
+    #-----------------------------------------------------------------------------------------------
+    """
+    Functions that probably only need to be run at initialization (unless the mesh structure changes
+    significantly for some reason).
+    """
+
+    def _compute_vert_tris(self):
+        """
+        Get all triangles containing each vertex (and its indices w/in the tri data)
+        """
+        # Map vertices within triangles
+        vert_tris, vert_tri_idxs = list(
+            map(list, zip(*[torch.where(self.tris == v) for v in range(self.nverts)]))
         )
-        self.vert_tris = pad_seq(tri_nbrs_1hop, batch_first=True, padding_value=-1)
-        self.vert_tri_inds = pad_seq(vert_tri_inds, batch_first=True, padding_value=-1)
+        self.vert_tris = pad_sequence(vert_tris, batch_first=True, padding_value=-1)
+        self.vert_tri_idxs = pad_sequence(vert_tri_idxs, batch_first=True, padding_value=-1)
         self.nvert_tris = (self.vert_tris != -1).sum(dim=1)
-
-        # Compile list of one-hop neighbors for each vertex
-        nbrs_1hop = [
-            torch.unique(self.tris[tri_nbrs_1hop[p]].flatten()) for p in range(self.nverts)
-        ]
+        
+    def _compute_neighbors(self):
         """
-        self.nbrs_1hop = pad_seq([
-            torch.cat([torch.tensor([p]), nbrs_1hop[p][torch.where(nbrs_1hop[p]!=p)]])
-            for p in range(self.nverts)
-        ], batch_first=True, padding_value=-1)
-        self.nnbrs_1hop = (self.nbrs_1hop!=-1).sum(dim=1)
+        Get lists of 1 and 2 hop neighbors
         """
-        # Now do the two-hop neighbors
-        nbrs_2hop = [
-            torch.unique(torch.cat([nbrs_1hop[p1] for p1 in nbrs_1hop[p]]))
-            for p in range(self.nverts)
+        # One-hop neighbors
+        vert_neighbors_1hop = [
+            torch.unique(self.tris[self.vert_tris[v][self.vert_tris[v] != -1]].flatten())
+            for v in range(self.nverts)
         ]
-        self.nbrs_2hop = pad_seq([
-            torch.cat([torch.tensor([p]), nbrs_2hop[p][torch.where(nbrs_2hop[p]!=p)]])
-            for p in range(self.nverts)
+        self.vert_neighbors_1hop = pad_sequence([
+            torch.cat([
+                torch.tensor([v]), vert_neighbors_1hop[v][torch.where(vert_neighbors_1hop[v] != v)]
+            ]) for v in range(self.nverts)
         ], batch_first=True, padding_value=-1)
-        self.nnbrs_2hop = (self.nbrs_2hop!=-1).sum(dim=1)
+        self.vert_nneighbors_1hop = (self.vert_neighbors_1hop != -1).sum(dim=1)
 
-        # Lastly, set everything to correct device
+        # Two-hop neighbors
+        vert_neighbors_2hop = [
+            torch.unique(torch.cat([vert_neighbors_1hop[u] for u in vert_neighbors_1hop[v]]))
+            for v in range(self.nverts)
+        ]
+        self.vert_neighbors_2hop = pad_sequence([
+            torch.cat([
+                torch.tensor([v]), vert_neighbors_2hop[v][torch.where(vert_neighbors_2hop[v] != v)]
+            ]) for v in range(self.nverts)
+        ], batch_first=True, padding_value=-1)
+        self.vert_nneighbors_2hop = (self.vert_neighbors_2hop != -1).sum(dim=1)
+
+    def _compute_proximity_trees(self):
+        """
+        Get all vertices within a certain distance (defined by a percentage of the mesh bounding 
+        box) from center vertex, excluding 1 hop neighbors (QUESTION: should it be 2 hop???)
+        """
+        # Use the kdtree of the original surfa mesh to find all vertices within range
+        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.proximity_ratio
+        close_verts = self.mesh.kdtree.query_ball_point(
+            self.mesh.vertices, max_dist, return_sorted=False
+        )
+        
+        self.vert_proximity = pad_sequence([
+            torch.tensor(
+                [x for x in close_verts[v] if x not in self.vert_neighbors_2hop[v]],
+                dtype=self.vert_neighbors_2hop[v].dtype
+            ) for v in range(self.nverts)
+        ], batch_first=True, padding_value=-1)
+
+        self.vert_nproximity = (self.vert_proximity != -1).sum(dim=1)
+        self.max_vert_nproximity = self.vert_nproximity.max().item()
+
+    def _set_device(self, device, verts_requires_grad=True):
+        """
+        Set device for all tensors necessary for downstream operations
+        """
         self.device = torch.device(
-            'cuda' if device == 'gpu' and torch.cuda.is_available() else 'cpu'
+            'cuda' if device == 'gpu' or device == 'cuda' and torch.cuda.is_available() else 'cpu'
         ) if not isinstance(device, torch.device) else device
-
+        
         self.verts = self.verts.to(self.device)
         self.tris = self.tris.to(self.device)
-        self.vnorms = self.vnorms.to(self.device)
         self.vert_tris = self.vert_tris.to(self.device)
-        self.vert_tri_inds = self.vert_tri_inds.to(self.device)
-        self.nbrs_2hop = self.nbrs_2hop.to(self.device)
+        self.vert_tri_idxs = self.vert_tri_idxs.to(self.device)
+        self.vert_neighbors_1hop = self.vert_neighbors_1hop.to(self.device)
+        self.vert_neighbors_2hop = self.vert_neighbors_2hop.to(self.device)
+        self.vert_nneighbors_1hop = self.vert_nneighbors_1hop.to(self.device)
+        self.vert_nneighbors_2hop = self.vert_nneighbors_2hop.to(self.device)
+
+        if verts_requires_grad:
+            self.verts.requires_grad = True
+
+        if self.vert_proximity is not None:
+            self.vert_proximity = self.vert_proximity.to(self.device)
+
+    def _freeze_verts(self, freeze_idxs=None):
+        """
+        Takes an array of indices and stores them as frozen/ripped verts. These vertex indices will
+        be avoided in spring energy computations.
+        """
+        self.rip_verts_flag = torch.zeros((self.nverts,), dtype=bool, device=self.verts.device)
+        if freeze_idxs is not None:
+            self.rip_verts_flag[freeze_idxs] = True
         
-    def _get_face_normal_data(self, X):
+    #-----------------------------------------------------------------------------------------------
+    """
+    Functions to compute properties that should be recalculated each time the mesh vertices are 
+    updated. To change the mesh vertices, use the TensorMesh._update_verts() function (do NOT use 
+    "tmesh.verts = <new_verts>", as this will not recompute everything.
+    """
+    
+    def _compute_edge_lengths(self):
         """
-        Computes the normal (N), corner angles (a), and the corresponding Jacobians (JN and Ja) for
-        each face in the mesh with respect to its corner vertices. Each array first has the
-        following dimensions:
-        -  N: [nt x nd]
-        - JN: [nt x nc x nd x nd]
-        -  a: [nt x nc]
-        - Ja: [nt x nc x nd]
+        Lengths of edges of triangle faces
+        """
+        edges = self.tris[:, [0, 1, 1, 2, 2, 0]].reshape(-1, 3, 2)
+        self.edge_lengths = (
+            (self.verts[edges[..., 1]] - self.verts[edges[..., 0]]) ** 2
+        ).sum(dim=2).sqrt()
 
-        Before exiting, the arrays are reshaped to correspond to each vertex and its associated
-        triangles (represented by nnbrs) as such:
-        -  N: [nv x nn x nd x  1]
-        - JN: [nv x nn x nd x nd]
-        -  a: [nv x nn x  1 x  1]
-        - Ja: [nv x nn x  1 x nd]
+    def _compute_vert_norms(self):
         """
-        nv = self.nverts
-        nt = self.ntris
-        nd = self.ndims
-        nc = 3 # because triangle
-        nn = self.nvert_tris.max()
+        Compute vertex normals
+        """
+        # Get face edges (consistent w/ surfa notation)
+        e1 = self.verts[self.tris][:, 1, :] - self.verts[self.tris][:, 0, :]
+        e2 = self.verts[self.tris][:, 2, :] - self.verts[self.tris][:, 1, :]
+        e3 = self.verts[self.tris][:, 2, :] - self.verts[self.tris][:, 0, :]
 
-        # Get face edges and Jacobians (I3) (consistent w/ surfa notation)
-        X = X[self.tris]
-        e1 = X[:, 1, :] - X[:, 0, :]
-        e2 = X[:, 2, :] - X[:, 1, :]
-        e3 = X[:, 2, :] - X[:, 0, :]
+        e1 = e1 / utils._norm(e1, dim=1)
+        e2 = e2 / utils._norm(e2, dim=1)
+        e3 = e3 / utils._norm(e3, dim=1)
 
-        I3 = _expand(torch.eye(nd, dtype=torch.float64, device=self.device), (0,), (nt, 1, 1))
+        # Face normals and angles corresponding to each vertex
+        tri_norms = torch.cross(e1, e2, dim=-1)
+        self.tri_norms = tri_norms / utils._norm(tri_norms, dim=1)
 
-        # Face normals
-        mN = torch.cross(e1, e2)
-        LN = _norm(mN,1)
-        N = mN/LN
-        """
-        Je1e2 = torch.cross(I3, _expand(e2, (-1,), (1, 1, nd)))
-        Je2e1 = torch.cross(I3, _expand(e1, (-1,), (1, 1, nd)))
-        JmN = torch.stack([Je1e2, -(Je1e2 + Je2e1), Je2e1], dim=1)
+        M1 = torch.stack([e3, -e1, e2], dim=1)
+        M2 = torch.stack([e1, e2, e3], dim=1)
+        self.tri_angles = torch.arccos(
+            utils._dot(M1, M2, dim=-1) / (utils._norm(M1, dim=-1) * utils._norm(M2, dim=-1))
+        ).squeeze()
 
-        mN = _expand(mN, (1, -1))
-        LN = _expand(LN, (1, -1))
-        JN = (1/torch.pow(LN, 2)) * ((LN * JmN) - (mN @ mN.transpose(-1, -2) @ JmN))
-        """
-        # Face angles
-        e_1 = torch.stack([e3, -e1, e2], dim=1)
-        e_2 = torch.stack([e1, e2, e3], dim=1)
-        en_1 = _norm(e_1, -1)
-        en_2 = _norm(e_2, -1)
-
-        ma = _dot(e_1, e_2, -1)
-        La = _norm(e_1, -1) * _norm(e_2,-1)
-        a = torch.arccos(ma / La)
-        """
-        Jma = - (e_1 + e_2)
-        Ja = (1/torch.pow(La,2)) * ((La * Jma) - (ma @ ma.transpose(-1, -2) @ Jma))
-        """
-        # Convert from face encoded to vertex encoded
-        N = torch.where(
-            _expand(self.vert_tris, (-1,), (1, 1, nd)) > -1,
-            N[self.vert_tris, ...], 0
-        ).unsqueeze(-1)
-        """
-        JN = torch.where(
-            _expand(self.vert_tris, (-1, -1), (1, 1, nd, nd)) > -1,
-            JN[self.vert_tris, self.vert_tri_inds, ...], 0
+        # Reshape normals/angles to be vertex encoded
+        tri_norms_vert = torch.where(
+            utils._expand(self.vert_tris, unsqueeze_dims=(-1,), repeats=(1, 1, self.ndims)) > -1,
+            self.tri_norms[self.vert_tris, ...], 0
         )
-        """
-        a = torch.where(
-            _expand(self.vert_tris, (-1,), (1, 1, 1)) > -1,
-            a[self.vert_tris, self.vert_tri_inds], 0
-        ).unsqueeze(-1)
-        """
-        Ja = torch.where(
-            _expand(self.vert_tris, (-1,), (1, 1, nd)) > -1,
-            Ja[self.vert_tris, self.vert_tri_inds, ...], 0
-        ).unsqueeze(-2)
-        """
-        #return N, JN, a, Ja
-        return N, a
-
-    def _get_rotation_matrices(self, X):
-        """
-        Computes the rotation matrix G (and its Jacobian JG) that will transform a neighborhood of
-        points into the normal/tangent coordinate system for the center vertex (p0). Note that JG
-        is the Jacobian of G wrt to the center vertex. G and JG should have the following
-        dimensions:
-        -  G = [ e1  e2  N]: [nv x nd x nd]
-        - JG = [Je1 Je2 JN]: [nv x nd x nd x nd]
-
-        Steps to calculate G:
-        1. Calculate face normals (Nf), face angles (af), and their Jacobians (JNf and Jaf).
-        2. Calculate the vertex normal N = sum(Nf_i * w_i) / norm(N), where i is an iterator over
-           all  faces that have p0 as a corner vertex. Here, w_i = af_i / sum(af_i), so this is
-           effectively just the average of the face normals, weighted by their face angles. Note
-           that sum(af_i) is always 2*pi.
-        3. Calculate the tangent e1 = [-Ny, Nx, 0] / norm(e1) or [-Nz, 0, Nx] / norm(e1), depending
-           whether Ny > Nz for each p0.
-        4. Calculate the tangent e2 = (N x e1) / norm(e2).
-
-        Steps to calculate JG:
-        1. Calculate JN wrt p0. If we let N = m/L, then JN = (1/L^2) * (L*Jm - m*JL).
-        2. Calculate Je1N (Je1 wrt N). If e1 = m1/L1, then Je1N = (1/L1^2) * (L1*Jm1N - m1*JL1N).
-           Then Je1 wrt p0 = Je1N * JN (chain rule!)
-        3. Calculate  Je2N (Je2 wrt N). If e2 = m21/L2, then Je2N = (1/L2^2) * (L2*Jm2N - m2*JL2N).
-           Then Je2 wrt p0 = Je2N * JN.
-        """
-        nv = self.nverts
-        nt = self.ntris
-        nn = self.nvert_tris.max().item()
-        nd = self.ndims
-
-        #Nf, JNf, af, Jaf = self._get_face_normal_data(X)
-        Nf, af = self._get_face_normal_data(X)
         
-        # Get vertex normals and their Jacobians wrt the corresponding center vertex
-        mN = _dot(Nf, af, 1).squeeze(1) / (2 * torch.pi) #.sum(dim=1) / (2*torch.pi)
-        LN = _norm(mN, 1)
-        N = (mN / LN).squeeze()
-        self.vnorms = N
-
-        """
-        JmN = (1 / (2 * torch.pi)) * ((Nf @ Jaf) + (af * JNf)).sum(dim=1)
-        JN = (1 / torch.pow(LN, 2)) * ((LN * JmN) - (mN @ mN.transpose(-2, -1) @ JmN))
-        """
+        # Vertex normals
+        face_mask = (self.vert_tris > -1).unsqueeze(dim=-1)
+        vert_norms = torch.where(
+            (self.vert_tris > -1).unsqueeze(dim=-1), tri_norms_vert, 0
+        ).sum(dim=1)
+        self.vert_norms = (vert_norms / utils._norm(vert_norms, dim=1)).squeeze()
         
-        # Define e1 and e2 (tangent vectors) to build G
-        yz_mask = _expand(N[..., 1].abs() > N[...,2].abs(), (1,), (1, nd))
-        e_yx = torch.stack([-N[..., 1], N[...,0], torch.zeros((nv), device=self.device)], dim=1)
-        e_zx = torch.stack([-N[..., 2], torch.zeros((nv), device=self.device), N[..., 0]], dim=1)
-
-        m1 = torch.where(yz_mask, e_yx, e_zx)
-        L1 = _norm(m1, 1)
-        e1 = m1 / L1
-
-        m2 = torch.cross(N, m1)
-        L2 = _norm(m2, 1)
-        e2 = m2 / L2
-
+    def _compute_vert_tangentss(self):
         """
-        # Get Jacobians of tanget vectors wrt the corresponding center vertex
-        Je_yx = _expand(
-            torch.stack([torch.tensor([0, 1, 0]),
-                         torch.tensor([-1, 0, 0]),
-                         torch.tensor([0, 0, 0])], dim=-1
-            ), (0,), (nv, 1, 1)
+        Compute the tangent vectors for each vertex (used in curvature and spring energy 
+        calculations)
+        """
+        # Permute/cross normal vector
+        N = self.vert_norms
+        vec1 = torch.linalg.cross(N, torch.stack([N[..., 1], N[..., 2], N[..., 0]], dim=-1))
+        vec2  = torch.linalg.cross(N, torch.stack([N[..., 1], -N[..., 2], N[..., 0]], dim=-1))
+
+        # Tangents
+        e1 = torch.where(torch.linalg.norm(vec1) < 0.001, vec2, vec1)
+        e2 = torch.linalg.cross(N, e1)
+
+        # Normalize
+        self.vert_tangents0 = e1 / utils._norm(e1, dim=1)
+        self.vert_tangents1 = e2 / utils._norm(e2, dim=1)
+
+    def _update_vert_properties(self, X=None):
+        """
+        Update the mesh vertices and associated properties
+        """
+        self.verts.data = X.data if X is not None else self.verts
+        self._compute_vert_norms()
+        self._compute_vert_tangentss()
+        self._compute_edge_lengths()
+
+    #-----------------------------------------------------------------------------------------------
+    """
+    Other functions
+    """
+    
+    def compute_points_along_normals(self, N=5, stepsize=0.5, direction='both', offset=False):
+        """
+        Computes a series of points extending along vertex normals
+        """
+        arr = torch.linspace(
+            start=(-stepsize * N if direction in ['both', 'in'] else 0),
+            end=(stepsize * N if direction in ['both', 'out'] else 0),
+            steps=(N * 2 + 1 if direction == 'both' else N + 1)
         ).to(self.device)
+        arr = torch.cat(
+            [arr - (stepsize / 2), (arr[-1] + (stepsize / 2)).unsqueeze(dim=0)]
+        ) if offset else arr
 
-        Je_zx = _expand(
-            torch.stack([torch.tensor([0, 0, 1]),
-                         torch.tensor([0, 0, 0]),
-                         torch.tensor([-1, 0, 0])], dim=-1
-            ), (0,), (nv, 1, 1)
-        ).to(self.device)
-
-        m1 = m1.unsqueeze(-1)
-        L1 = L1.unsqueeze(-1)
-        Jm1N = torch.where(_expand(yz_mask, (-1,), (1, 1, nd)), Je_yx, Je_zx).to(torch.float64)
-        Je1 = (1 / torch.pow(L1, 2)) * ((L1 * Jm1N) - (m1 @ m1.transpose(-1, -2) @ Jm1N)) * JN
-
-        m2 = m2.unsqueeze(-1)
-        L2 = L2.unsqueeze(-1)
-
-        Jm2N = (
-            torch.cross(JN, _expand(m1, (), (1, 1, nd)))
-            + torch.cross(_expand(N, (-1,), (1, 1, nd)), Je1)
+        vert_norm_points = self.verts.unsqueeze(-1) + (
+            self.vert_norms.detach().unsqueeze(-1) * arr.unsqueeze(0)
         )
-        Je2 = (1 / torch.pow(L2, 2)) * ((L2 * Jm2N) - (m2 @ m2.transpose(-1, -2) @ Jm2N)) * JN
+        return vert_norm_points.transpose(1, 2)
+
+    def neighbor_displacements(self, pair_type, exclude_ripped=False, return_mask=True):
         """
-        # Stack to create set of rotation matrices
-        G = torch.stack([e1, e2, N], dim=-1)
-        #JG = torch.stack([Je1, Je2, JN], dim=-1)
-
-        return G #, JG
-
-    def _mean_curvature(self, X=None, do_grad=False):
+        Compute the distance vectors between each vertex and the set of either:
+        1. 1-hop neigbors (pair_type == '1hop')
+        2. 2-hop neighbors (pair_type == '2hop')
+        3. Proximity tree adjacency (pair_type == 'prox')
+        TO-DO: double check if exclude_center is actually necessary
         """
-        Calculate mean curvature/gradient at each vertex
-        """
-        # Curvature calculations
-        C = torch.tensor([1, 0, 1], device=self.device, dtype=torch.float64).unsqueeze(0)
-        X = self.verts if X is None else X.to(self.device)
+        # Get correct neighbor adjacency
+        if pair_type == '1hop':
+            neighbors = self.vert_neighbors_1hop
+        elif pair_type == '2hop':
+            neighbors = self.vert_neighbors_2hop
+        elif pair_type == 'prox':
+            neighbors = self.vert_proximity
 
-        nv = self.nverts
-        nd = self.ndims
-        nn = self.nnbrs_2hop.max().item()
-
-        # Get vertex coords and neighbors
-        nbrs = _expand(self.nbrs_2hop, (-1,), (1, 1, nd))
-        V = _expand(X, (1,), (1, nn, 1))
-        P = torch.where(nbrs > -1, X[self.nbrs_2hop], V)
-        M = P - V
-
-        # Transform coords into normal/tangent space
-        M = P - V
-        #G, dG = self._get_rotation_matrices(X)
-        G = self._get_rotation_matrices(X)
+        nneighbors = neighbors.shape[1]
+        valid_neighbors = neighbors > -1
         
-        T = M @ G
-        u = T[..., 0].unsqueeze(-1)
-        v = T[..., 1].unsqueeze(-1)
-        w = T[..., 2].unsqueeze(-1)
+        # Exclude ripped (if flagged)
+        if exclude_ripped:
+            valid_neighbors &= (~self.rip_verts_flag)[neighbors]
+            valid_neighbors[self.rip_verts_flag] = False
 
-        # GLM
-        Q = torch.cat([u * u, 2 * u * v, v * v], dim=-1)
-        Qt = Q.transpose(-2, -1)
-        F = torch.linalg.inv(Qt @ Q)
-        B = F @ Qt @ w
-        H = (C @ B).squeeze(-1)
-
-        return H
-    """
-        # Gradient calculations
-        if do
-        I3 = torch.eye(nd, device=self.device, dtype=torch.float64).unsqueeze(0)
-        iD = torch.arange(1,nn)
-
-        dM = torch.zeros((nv, nn, nd, nn, nd), device=self.device, dtype=torch.float64)
-        dM[:, 0, :, 1:, :] = -1 * _expand(I3, (2,), (nv, 1, nn - 1, 1))
-        dM[:, iD, :, iD, :] = _expand(I3, (), (nv, 1, 1))
-
-        u = _expand(u, (-1, -1), (1, 1, nd, nn, 1))
-        v = _expand(v, (-1, -1), (1, 1, nd, nn, 1))
-        w = _expand(w, (-1, -1), (1, 1, nd, nn, 1))
-        Q = _expand(Q, (1, 1), (1, nn, nd, 1, 1))
-        Qt = _expand(Qt, (1, 1), (1, nn, nd, 1, 1))
-        F = _expand(F, (1, 1), (1, nn, nd, 1, 1))
-
-        # Calculate Jacobians
-        M_dG_u = torch.einsum('vni,vij->vnj', M, dG[..., 0])
-        M_dG_v = torch.einsum('vni,vij->vnj', M, dG[..., 1])
-        M_dG_w = torch.einsum('vni,vij->vnj', M, dG[..., 2])
-        
-        du = (dM @ _expand(G[...,0], (1, 1, -1), (1, nn, nd, 1, 1)))
-        dv = (dM @ _expand(G[...,1], (1, 1, -1), (1, nn, nd, 1, 1)))
-        dw = (dM @ _expand(G[...,2], (1, 1, -1), (1, nn, nd, 1, 1)))
-
-        du[:, :, :, 0, :] += M_dG_u.unsqueeze(-1)
-        dv[:, :, :, 0, :] += M_dG_v.unsqueeze(-1)
-        dw[:, :, :, 0, :] += M_dG_w.unsqueeze(-1)
-
-        dQ = torch.cat([2 * du * u, 2 * (dv * u + du * v), 2 * dv * v], dim=-1)
-        dQt = dQ.transpose(-2, -1)
-        dF = -F @ ((dQt @ Q) + (Qt @ dQ)) @ F
-        dB = (dF @ Qt @ w) + (F @ dQt @ w) + (F @ Qt @ dw)
-        J_H = (C @ dB).squeeze()
-        
-        return H, J_H
-    """
-
-    def _update_verts(self, X):
-        self.verts = X
-        
-
-# --------------------------------------------------------------------------------------------------
-
-def _dot(x, y, d=-1):
-    """
-    Calculates dot product of two tensors (because torch.dot only works with 1D tensors)
-    """
-    return torch.sum(x * y, dim=d).unsqueeze(d)
-
-def _expand(x, unsq, rpts=None):
-    """
-    Custom function to expand the shape of a tensor (useful for matrix operations with large
-    tensors without using any for loops). Mostly helps keep the code clean.
-    """
-    if rpts is not None:
-        assert (
-            len(rpts) == len(x.shape) + len(unsq),
-            "In _expand(), len(rpts) must equal len(x.shape) + len(unsq)"
+        # Distance calculation
+        V0 = utils._expand(self.verts, unsqueeze_dims=(1,), repeats=(1, nneighbors, 1))
+        Vn = torch.where(
+            utils._expand(valid_neighbors, unsqueeze_dims=(-1,), repeats=(1, 1, self.ndims)),
+            self.verts[neighbors], V0
         )
-    for d in unsq:
-        x = x.unsqueeze(d)
-    return x if rpts is None else x.repeat(rpts)
 
-def _norm(x, d):
-    """
-    Custom function to normalize a tensor without reducing its number of dimensions. Also mostly
-    just helps to keep the code cleaner.
-    """
-    return torch.norm(x, dim=d).unsqueeze(d)
+        if return_mask:
+            return (Vn - V0), valid_neighbors
+        else:
+            return (Vn - V0)
+
+    def smooth_over_neighbors(self, vec, mask, N_avgs=1, n_hops=1, signed=True, start_idx=0):
+        """
+        Smooth an input array over neighbors
+        """
+        if vec.shape[0] != self.nverts:
+            utils.fatal('smooth_over_neighbors requires input with vec.shape[0] == nverts')
+        if len(vec.shape) < 2:
+            vec = vec.unsqueeze(dim=-1)
+
+        # Parse valid neighbors
+        neighbors = self.vert_neighbors_2hop if n_hops == 2 else self.vert_neighbors_1hop
+        valid_neighbors = torch.where(
+            (neighbors > -1) & mask.unsqueeze(dim=-1), mask[neighbors], False
+        ).unsqueeze(dim=-1)
+
+        if start_idx > 0:
+            valid_neighbors[:, :start_idx] = False
+            
+        n_valid = valid_neighbors.sum(dim=1).clamp(1)
+
+        # Iterative smoothing
+        for _ in range(N_avgs):
+            signed_mask = (
+                valid_neighbors & (
+                    (vec[neighbors] * vec.unsqueeze(dim=1)).sum(dim=-1, keepdims=True) >= 0
+                ) if signed
+                else valid_neighbors
+            )
+            vec = torch.where(signed_mask, vec[neighbors], 0).sum(dim=1) / n_valid
+
+        return vec
