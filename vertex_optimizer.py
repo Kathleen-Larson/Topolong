@@ -4,9 +4,11 @@ import surfa as sf
 import torch
 import time
 
+from torch.nn.utils.rnn import pad_sequence
+
 import utils
 from tensor_mesh import TensorMesh
-from tensor_image import TensorImage
+from tensor_image import TensorImage, GGVF
 from border_stats import BorderStatsGenerator
 
 
@@ -33,6 +35,7 @@ class MRISPlaceSurface:
             proximity_ratio=0.05,  # % of mesh bbox to include in proximity trees (for debugging)
             separate_loss_types=False,
             smoothing_sigma=2.,  #
+            use_ggvf=True,
             targets_fname=None,  # name of file containing target intensities (probs debug only)
             borders_dict=None,  # dict containing border intensities
             surf='white',       # surface (pial or white)
@@ -86,9 +89,17 @@ class MRISPlaceSurface:
         # Initialize mesh to be optimized
         self.surf = surf
         self.hemi = hemi
-        self.fix_mtl = (self.surf == 'pial')
-        self.use_curvature_residuals = mesh_target is None
 
+        if self.surf == 'pial':
+            self.fix_mtl = True
+            self.cost_repulsion = self.cost_surface_repulsion
+            self.mesh_repulse = in_white.copy() if in_pial is None else in_pial.copy()
+        else:
+            self.fix_mtl = False
+            self.cost_repulsion = self.cost_vertex_repulsion
+
+        self.use_curvature_residuals = mesh_target is None
+        
         if in_pial is None and in_white is None:
             utils.fatal('[MRISPlaceSurface] error: must provide at least one input surface')
         if in_pial is not None and in_white is not None:
@@ -98,13 +109,10 @@ class MRISPlaceSurface:
         self.mesh = in_white.copy() if in_pial is None else in_pial.copy()
         self.tmesh = TensorMesh(
             mesh=self.mesh,
-            device=device,
+            device=self.device,
             verts_requires_grad=True,
-            compute_curvature=do_curvature_loss,
-            compute_curvature_residuals=self.use_curvature_residuals,
-            compute_repulsion_energy=do_repulsion_loss,
-            compute_spring_energy=do_spring_loss,
-            proximity_ratio=proximity_ratio
+            proximity_ratio=proximity_ratio,
+            compute_proximity_tree=(False if surf == 'pial' else True),
         )
 
         # Target curvature?
@@ -122,6 +130,17 @@ class MRISPlaceSurface:
         # Set fixed (aka ripped) vertices
         tseg = TensorImage(seg, dtype='int', device=self.device)
         self._set_fixed_vertices(seg=tseg, lut=lut)
+
+        # Set up repulsion surface (e.g., to push pial away from white)
+        if self.surf == 'pial':
+            self.tmesh_repulsion = TensorMesh(
+                self.mesh_repulse,
+                compute_proximity_tree=False,
+                device=self.device
+            )
+            self._compute_intersurface_proximity_tree()
+        else:
+            self.tmesh_repulsion = None
         
         # # Determine target intensities for vertex placement
         if do_intensity_loss:
@@ -136,6 +155,7 @@ class MRISPlaceSurface:
                             'loss')
             self.image = image
             self.timage = TensorImage(image, do_smoothing=True, device=device)
+            self.ggvf = GGVF(image, device=device)
             
             """
             Right now this is hard coded from autodet.gw.stats.lh.dat, but will replace with 
@@ -168,12 +188,16 @@ class MRISPlaceSurface:
                 ).compute_border_stats(gm_lo=30, gm_hi=110, use_modes=True, which='white')
                 """
                 if not targets_fname:
+                    self._calculate_target_intensities = (
+                        self._calculate_target_intensities_ggvf if use_ggvf
+                        else self._calculate_target_intensities_FS
+                    )
+                    self._calculate_target_intensities(n_avg_iters=5)
+                else:
                     self.target_intensities = torch.tensor(
                         np.loadtxt('target_vals.txt'), device=self.device, dtype=torch.float
                     ).unsqueeze(dim=-1)
                     self.has_valid_intensity = (~self.rip_verts_flag)
-                else:
-                    self._calculate_target_intensities(n_avg_iters=5)
                 
     def _set_fixed_vertices(self, seg, lut):
         """
@@ -201,7 +225,7 @@ class MRISPlaceSurface:
 
         pos = torch.arange(0, (n_pts * step) + step, step).repeat([nverts, 1]).to(self.device)
         pts = self.tmesh.compute_points_along_normals(N=n_pts, stepsize=step)
-        pt_labels = seg._interp(pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
+        pt_labels = seg.interpolate(pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
         
         # Define separate search directions
         pt_labels_out = pt_labels[:, n_pts:]
@@ -263,7 +287,7 @@ class MRISPlaceSurface:
                 torch.tensor([0, 0, 1.], device=self.device)
                 * torch.arange(0, 10 + step, step, device=self.device).unsqueeze(dim=-1)
             )
-            z_pt_labels = seg._interp(z_pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
+            z_pt_labels = seg.interpolate(z_pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
             M = check_pt_labels(z_pt_labels, 'Putamen')
 
             self.rip_verts_flag |= (M[:, :3].any(dim=-1) & (M.float().mean(dim=-1) > 0.5))
@@ -294,8 +318,121 @@ class MRISPlaceSurface:
 
         # Store rip_verts_flag as tmesh attribute
         self.tmesh._freeze_verts(torch.where(self.rip_verts_flag)[0])
-            
-    def _calculate_target_intensities(self, max_dist=10., n_avg_iters=0):
+
+    def _calculate_target_intensities_ggvf(self, max_dist=10., step_factor=1., n_avg_iters=5):
+        """
+        Calculates target intensities for each vertex by sampling along GGVF profiles to find best 
+        location (e.g., gradient minima with valid intensities)
+        """
+        valid = (~self.rip_verts_flag)
+        n_valid = valid.sum().item()
+        nverts = self.tmesh.nverts
+        eps = 1e-5
+
+        step_sz = 0.1 * step_factor * self.timage.voxsize[0]
+        max_dist *= step_factor
+        n_steps = int((max_dist / self.timage.voxsize.min()).ceil().item() / step_sz)
+
+        # Generate points along GGVF field lines
+        n_pts = 2 * n_steps + 1
+        pts = torch.zeros((nverts, n_pts, 3), device=self.device)
+        pts[:, n_steps, :] = self.tmesh.verts
+
+        def build_ggvf_profile(sign=1):
+            x = torch.zeros((n_valid, n_steps + 1, 3)).to(self.device)
+            x[:, 0, :] = self.tmesh.verts[valid].clone()
+            x_vox = self.timage.transform(x[:, 0, :], geom='surf2vox')
+
+            for n in range(n_steps):
+                # Interpolate GGVF field at verts
+                xn = x[:, n, :]
+                field = self.ggvf.interpolate(xn).transpose(0, 1)
+                mag = field.norm(dim=-1, keepdim=True)
+                dirs = sign * step_sz * (field / mag.clamp(min=eps))
+
+                # Update search position
+                x_vox = self.timage.transform(xn, geom='surf2vox') + dirs
+                x[:, n + 1, :] = self.timage.transform(x_vox, geom='vox2surf')
+
+            return x[:, 1:, :]
+
+        pts[valid, :n_steps , :] = build_ggvf_profile(sign=1).flip(dims=(1,))
+        pts[valid, (n_steps + 1):, :] = build_ggvf_profile(sign=-1)
+
+        # Find points along profiles with valid intensities
+        I = torch.zeros((nverts, n_pts), dtype=self.timage.dtype, device=self.device)
+        I[valid] = self.timage.interpolate(pts[valid])
+        I_ok = (I >= self.borders_dict['border_lo']) & (I <= self.borders_dict['border_hi'])
+
+        # Find local gradient minima along I profiles
+        g = torch.zeros_like(I)
+        g[:, 1:-1] = 0.5 * (I[:, 2:] - I[:, :-2])
+        g_ok = (g < -eps)
+
+        g_is_minima = torch.nn.functional.pad(
+            (g[:, 1:-1] < g[:, :-2]) & (g[:, 1:-1] < g[:, 2:]),
+            (1, 1), value=0
+        ) & (g.abs() > eps)
+
+        # Create 1mm look ahead w/ outside bounds        
+        lookahead_dist = 1.0
+        offset = max(1, int(round(lookahead_dist / step_sz.item())))
+        I_shift = torch.roll(I, shifts=-offset, dims=-1)
+        valid_shift = torch.zeros_like(I, dtype=torch.bool)
+        valid_shift[:, :-offset] = True
+
+        lookahead_ok = (
+            valid_shift
+            & (I_shift >= self.borders_dict['outside_lo'])
+            & (I_shift <= torch.as_tensor(
+                [self.borders_dict['border_hi'], self.borders_dict['outside_hi']]
+            ).min())
+        )
+
+        # Combine
+        is_local_grad_min = I_ok & g_ok & g_is_minima
+        is_lookahead_candidate = I_ok & g_ok & lookahead_ok
+
+        found_local_grad_min = is_local_grad_min.any(dim=1)
+        found_lookahead_candidate = is_lookahead_candidate.any(dim=1)
+        found = found_local_grad_min | found_lookahead_candidate
+        
+        target_idxs = torch.where(
+            is_local_grad_min.any(dim=1),
+            torch.where(is_local_grad_min, g, torch.inf).argmin(dim=-1),
+            torch.where(is_lookahead_candidate, I, torch.inf).argmin(dim=1)
+        )
+
+        # If no grad min or valid lookahead candidate, just use intensity/gradients
+        is_any_candidate = I_ok & g_ok
+        found_any_candidate = is_any_candidate.any(dim=1)
+        
+        target_idxs = torch.where(
+            found, target_idxs, n_pts - is_any_candidate.int().flip(dims=(-1,)).argmax(dim=-1)
+        )
+        found = found | found_any_candidate
+
+        # Get target intensities/positions
+        self.target_intensities = torch.zeros((nverts,), dtype=I.dtype, device=self.device)
+        self.target_intensities[found] = I[found, target_idxs[found]]
+
+        self.target_pts = self.tmesh.verts.clone()
+        self.target_pts[found] = pts[found, target_idxs[found]].double()
+
+        """
+        target_mesh = self.mesh.copy()
+        target_mesh.vertices = self.target_pts.detach().cpu()
+        target_mesh.save('target_pts_pial_ggvf')
+        """
+
+        # Average values across neighbors
+        self.has_valid_intensity = found & valid
+        self.target_intensities = self.tmesh.smooth_over_neighbors(
+            self.target_intensities.squeeze(), mask=self.has_valid_intensity,
+            N_avgs=n_avg_iters, n_hops=1, signed=False, remove_outliers=True
+        )
+    
+    def _calculate_target_intensities_FS(self, max_dist=10., n_avg_iters=0, step_factor=1.):
         """
         This is doing what MRISComputeBorderValues_new() does
         sigma=2 for both pial_sigma and white_sigma
@@ -309,29 +446,33 @@ class MRISPlaceSurface:
         step_sz_up = step_sz / upsample
         
         pts = self.tmesh.compute_points_along_normals(
-            N=np.ceil(max_dist / step_sz).int(), stepsize=step_sz
-        )
-        pts_up = self.tmesh.compute_points_along_normals(
-            N=np.ceil(max_dist / step_sz_up).int(), stepsize=step_sz_up, offset=True
-        )
-
+            N=(max_dist / step_sz).ceil().int(), stepsize=step_sz
+        ).to(self.device)
         n_pts = pts.shape[1]
-        center_idx = (pts.shape[1] - 1) // 2
+        center_idx = (n_pts - 1) // 2
+        
+        pts_up = self.tmesh.compute_points_along_normals(
+            N=(max_dist / step_sz_up).ceil().int(), stepsize=step_sz_up, offset=True
+        ).to(self.device)
+        n_pts_up = pts_up.shape[1]
+        center_idx_up = (pts_up.shape[1] - 1) // 2
         
         # Intensity profiles (between border_lo and border_hi, constant at all sigmas)
-        I = self.timage._interp(pts)
-        I_up = self.timage._interp(pts_up)
+        I = self.timage.interpolate(pts, geom='surf2vox')
+        I_up = self.timage.interpolate(pts_up, geom='surf2vox')
         I_up_ok = (
             (I_up >= self.borders_dict['border_lo']) & (I_up <= self.borders_dict['border_hi'])
         )
-        
+
         # Distance profiles
-        pos = torch.arange(start=(-max_dist), end=(max_dist + step_sz), step=step_sz)
+        pos = torch.arange(
+            start=(-max_dist), end=(max_dist + step_sz), step=step_sz
+        ).to(self.device)
         pos_up = torch.arange(
             start=(-max_dist - step_sz_up / 2),
             end=(max_dist + step_sz_up / 2) + step_sz_up / 2,
             step=step_sz_up
-        )
+        ).to(self.device)
 
         # Iterate over increasing sigma values to find distance bounds (skip ripped verts)
         pos_up_ok = torch.zeros_like(I_up, dtype=torch.bool)
@@ -343,7 +484,7 @@ class MRISPlaceSurface:
         sigma = self.smoothing_sigma
         self.grad_sigmas = torch.zeros((nverts,))
         self.grad_sign = torch.zeros((nverts,))
-
+        
         while n_remaining > 0 and sigma <= (10 * self.smoothing_sigma):
             # Gradient mask (changes w/ sigma)
             g = self.timage._interp_derivative(
@@ -359,25 +500,34 @@ class MRISPlaceSurface:
             in_ok = (g_neg[:, :center_idx] & I_band_hi[:, :center_idx]).flip(dims=(-1,))
             in_steps = torch.cumprod(in_ok.to(torch.int8), dim=-1).sum(dim=-1)
             in_idxs = center_idx - in_steps
-            in_pos_up_ok = pos_up >= (pos[in_idxs] - step_sz / 2).unsqueeze(dim=1)
-
+            in_pos_ok = pos >= pos[in_idxs].unsqueeze(dim=1)
+            
             # Parse criteria in outward direction (towards CSF)
             out_ok = g_neg[:, (center_idx + 1):] & I_band_lo[:, (center_idx + 1):]
             out_steps = torch.cumprod(out_ok.to(torch.int8), dim=-1).sum(dim=-1)
             out_idxs = center_idx + out_steps
-            out_pos_up_ok = pos_up <= (pos[out_idxs] + step_sz / 2).unsqueeze(dim=1)
+            out_pos_ok = pos <= pos[out_idxs].unsqueeze(dim=1)
 
-            # Double check if center is ok
-            center_ok = (
+            # Double check if center is ok and update idxs
+            center_ok_old = (
                 g_neg[:, center_idx] & (I_band_hi[:, center_idx] | I_band_lo[:, center_idx])
-            )            
+            )
+            center_ok = g_neg[:, center_idx] & I_band_hi[:, center_idx] & I_band_lo[:, center_idx]
 
-            # Combine and flag verts with no range found at current sigma
+            in_idxs = torch.where((in_idxs == center_idx) & (~center_ok), in_idxs + 1, in_idxs)
+            out_idxs = torch.where((out_idxs == center_idx) & (~center_ok), out_idxs - 1, out_idxs)
+
+            in_pos_ok = pos >= pos[in_idxs].unsqueeze(dim=1)
+            out_pos_ok = pos <= pos[out_idxs].unsqueeze(dim=1)
+            pos_ok = (in_pos_ok & out_pos_ok)
+
+            # Upsample
+            in_pos_up_ok = pos_up >= (pos[in_idxs] - step_sz / 2).unsqueeze(dim=1)
+            out_pos_up_ok = pos_up <= (pos[out_idxs] + step_sz / 2).unsqueeze(dim=1)
             pos_up_ok_it = (in_pos_up_ok & out_pos_up_ok)
-            pos_up_ok_it[~center_ok] = False
             found_range_it = pos_up_ok_it.any(dim=1)
 
-            # Update
+            # Update and flag verts with no range found at current sigma
             pos_up_ok[remaining_idxs[found_range_it]] = pos_up_ok_it[found_range_it]
             found_range[remaining_idxs[found_range_it]] = True
             self.grad_sigmas[remaining_idxs[found_range_it]] = sigma
@@ -386,6 +536,16 @@ class MRISPlaceSurface:
             n_remaining = nverts - found_range.sum()
             sigma *= 2
 
+        # Find local minima of upsampled gradient criteria (expensive)
+        g_up = torch.zeros_like(I_up)
+        g_up[~self.rip_verts_flag] = self.timage._interp_derivative(
+            pts_up[~self.rip_verts_flag], self.tmesh.vert_norms[~self.rip_verts_flag], sigma=2
+        ).to(I_up.dtype)
+        g_is_extrema = torch.nn.functional.pad(
+            (g_up[:, 1:-1].abs() > g_up[:, :-2].abs()) & (g_up.abs()[:, 1:-1] > g_up[:, 2:].abs()),
+            (1, 1), value=0
+        ) & (g_up.abs() > eps)
+            
         # Create 1mm look ahead w/ outside bounds
         offset = max(1, int(round(1.0 / step_sz_up.item())))
         I_shift = torch.roll(I_up, shifts=-offset, dims=-1)
@@ -400,34 +560,41 @@ class MRISPlaceSurface:
             ).min())
         )
 
-        has_candidate = I_up_ok & pos_up_ok & lookahead_ok
-        found_idx = has_candidate.any(dim=1)
-        
-        # Find local minima of upsampled gradient criteria (expensive)
-        g_up = torch.zeros_like(I_up)
-        g_up[found_idx] = self.timage._interp_derivative(
-            pts_up[found_idx], self.tmesh.vert_norms[found_idx], sigma=2
-        ).to(I_up.dtype)
-        g_is_minima = torch.nn.functional.pad(
-            (g_up[:, 1:-1] < g_up[:, :-2]) & (g_up[:, 1:-1] < g_up[:, 2:]),
-            (1, 1), value=0
-        ) & (g_up.abs() > eps)
-
         # Combine everything to find idx of target intensity
-        has_local_grad_min = pos_up_ok & I_up_ok & lookahead_ok & g_is_minima
-        found_local_grad_min = has_local_grad_min.any(dim=1)
+        has_local_grad_min = pos_up_ok & I_up_ok & lookahead_ok & g_is_extrema
+        has_lookahead_candidate = I_up_ok & pos_up_ok & lookahead_ok
 
+        found_local_grad_min = has_local_grad_min.any(dim=1)
+        found_lookahead_candidate = has_lookahead_candidate.any(dim=1)
+        found_idx = found_local_grad_min | found_lookahead_candidate
+        
         target_idxs = torch.where(
             found_local_grad_min,
             torch.where(has_local_grad_min, g_up, torch.inf).argmin(dim=1),
-            torch.where(has_candidate, g_up, torch.inf).argmin(dim=1)
+            torch.where(has_lookahead_candidate, I_up, torch.inf).argmin(dim=1)
         )
-
+        
+        # If no target idx, use last value in identified distance range
+        found_any_candidate = pos_up_ok.any(dim=1)
+        
+        target_idxs = torch.where(
+            found_idx, target_idxs, n_pts_up - pos_up_ok.flip(dims=(-1,)).int().argmax(dim=-1)
+        )
+        found_idx = found_idx | found_any_candidate
+        
+        # Get target intensities/positions
         self.target_intensities = torch.zeros((nverts,), dtype=I.dtype, device=self.device)
         self.target_intensities[found_idx] = I_up[found_idx, target_idxs[found_idx]]
 
         self.target_pts = self.tmesh.verts.clone()
         self.target_pts[found_idx] = pts_up[found_idx, target_idxs[found_idx]]
+
+        """
+        target_mesh = self.mesh.copy()
+        target_mesh.vertices = self.target_pts.detach().cpu()
+        target_mesh.save('target_pts_pial_FS')
+        print('target_pts_pial_FS')
+        """
 
         self.target_pos = torch.zeros_like(self.target_intensities)
         self.target_pos[found_idx] = pos_up[target_idxs[found_idx]]
@@ -437,6 +604,28 @@ class MRISPlaceSurface:
         self.target_intensities = self.tmesh.smooth_over_neighbors(
             self.target_intensities, mask=self.has_valid_intensity, N_avgs=5, n_hops=1, signed=False
         )
+
+    def _compute_intersurface_proximity_tree(self, proximity_ratio=0.05):
+        """
+        Compute proximity tree between moving and fixed (original, probaly) surfaces. Pretty much 
+        exactly the same function as the one in the TensorMesh class, but the kd tree is calculated
+        for points of another surface instead of itself
+        """
+        # Find vertices within distance bounds
+        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * proximity_ratio
+        close_verts = self.mesh.kdtree.query_ball_point(
+            self.tmesh_repulsion.verts.detach().cpu(), max_dist, return_sorted=False
+        )
+
+        # Store as tensor
+        nv = self.tmesh.nverts
+        self.intersurface_proximity_tree = pad_sequence(
+            [torch.tensor([x for x in close_verts[v]], dtype=torch.long) for v in range(nv)],
+            batch_first=True, padding_value=-1
+        ).to(self.device)
+
+        self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
+        self.max_intersurface_nproximity = self.intersurface_nproximity.max().item()
 
     # COST FUNCTIONS -------------------------------------------------------------------------------
 
@@ -478,7 +667,7 @@ class MRISPlaceSurface:
         n_valid = valid.sum()
 
         I = self.target_intensities.clone()
-        I[valid] = self.timage._interp(self.tmesh.verts[valid]).transpose(0, 1)
+        I[valid] = self.timage.interpolate(self.tmesh.verts[valid], geom='surf2vox').transpose(0, 1)
         delta_I = (self.target_intensities - I)
         
         if self.separate_loss_types:
@@ -490,6 +679,7 @@ class MRISPlaceSurface:
 
             # Compute loss
             cost = (delta_I ** 2).sum()
+            
             return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed
 
         else:
@@ -501,10 +691,51 @@ class MRISPlaceSurface:
             ).sum()
 
             return weight * (1. / n_valid) * cost
-        
-    def cost_repulsion(self, weight=1.):
+
+    def cost_surface_repulsion(self, weight=1., thresh=1.0):
         """
-        Repulsion energy cost
+        Repulsion energy cost (between two surfaces)
+        
+        - for each vert, iterate through bucket
+
+        - if something:
+        - scale = weight * (1 - dot)^4
+        - dot is dot product between dxyz and normal
+        - dxyz is distance between coords in bin
+        """
+        # Get distances between each vertex and another mesh
+        valid_verts = self.intersurface_proximity_tree > -1
+        valid_verts &= (~self.rip_verts_flag)[self.intersurface_proximity_tree]
+
+        ndims = self.tmesh.ndims
+        n_prox_verts = self.intersurface_proximity_tree.shape[1]
+        sgn = 1.0 # check this
+        
+        # Distance calculation
+        V0 = utils._expand(self.tmesh.verts, unsqueeze_dims=(1,), repeats=(1, n_prox_verts, 1))
+        Vn = torch.where(
+            utils._expand(valid_verts, unsqueeze_dims=(-1,), repeats=(1, 1, ndims)),
+            self.tmesh.verts[self.intersurface_proximity_tree], V0
+        )
+        disps = Vn - V0
+
+        # Dot product between displacement and normals
+        Nn = self.tmesh_repulsion.vert_norms[self.intersurface_proximity_tree]
+        dot = (self.tmesh.vert_norms.unsqueeze(dim=1) * Nn).sum(dim=-1)
+
+        valid = (sgn * dot <= thresh) & valid_verts
+        num = valid.sum(dim=1)
+        dot = dot.clamp(min=-thresh, max=thresh)
+        
+        # Repulsion energy (weight * (1 - (dot.clamp(-val, val)) ** 4)) 
+        repulsion = (1. / 5.) * valid * ((1. - dot) ** 5)
+        n_valid = (~self.rip_verts_flag).sum()
+
+        return weight * (1. / n_valid) * repulsion.sum()
+            
+    def cost_vertex_repulsion(self, weight=1.):
+        """
+        Repulsion energy cost (between verts of a single surface)
         """
         # Q: how to calculate bin ???
         min_dist = 1.0 #* 10 (uncomment for phantoms)
@@ -516,16 +747,16 @@ class MRISPlaceSurface:
             pair_type='prox', exclude_ripped=True, return_mask=True
         )
         dists = disps.norm(dim=-1) + repulse_e
-        n_valid = valid.sum()
-        
+
         # Filter ones outside min_dist
         mask = (dists <= (min_dist - repulse_e)) & valid
         num = mask.sum(dim=1).clamp(min=1)
 
         # Repulsion energy
         repulsion = ((2. / 3.) * repulse_k / num) * (mask / (dists ** 6)).sum(dim=1)
-
-        return weight * (1. / n_valid) * repulsion.sum() # / n_repulse
+        n_valid = (~self.rip_verts_flag).sum()
+        
+        return weight * (1. / n_valid) * repulsion.sum()
 
     def cost_spring(self, weight=[1., 1.]):
         """
@@ -627,6 +858,10 @@ class MRISPlaceSurface:
         X = self.tmesh.verts
         X_init = X.clone()
 
+        #vno = 7771
+        #v = X_init[vno]
+        #N = self.tmesh.vert_norms[vno].clone()
+        
         opt = torch.optim.LBFGS(
             [X], lr=lr,
             history_size=history_size,
@@ -655,15 +890,20 @@ class MRISPlaceSurface:
             # Closure function
             opt.step(closure)
 
+            #print(f'disp: {((X[vno] - v) ** 2).sum().sqrt(): .3f}, dot: {torch.dot(N, self.tmesh.vert_norms[vno]):.3f}')
+            
             # Refresh cached properties
             if 'cost_repulsion' in self.losses_dict:
                 with torch.no_grad():
-                    self.tmesh._compute_proximity_trees()
-            """
+                    if self.surf == 'pial':
+                        self._compute_intersurface_proximity_tree()
+                    else:
+                        self.tmesh._compute_proximity_trees()
+                
             if 'cost_intensity' in self.losses_dict:
                 with torch.no_grad():
-                    self._calculate_target_intensities()
-            """
+                    self._calculate_target_intensities(step_factor=1.)
+
         # Update input surfa mesh
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
 
