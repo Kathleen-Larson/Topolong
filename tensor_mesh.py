@@ -22,10 +22,6 @@ class TensorMesh:
             mesh,
             device=None,
             compute_proximity_tree=True,
-            compute_curvature=True,
-            compute_curvature_residuals=True,
-            compute_repulsion_energy=True,
-            compute_spring_energy=True,
             verts_requires_grad=False,
             proximity_ratio=0.1
     ):
@@ -33,11 +29,17 @@ class TensorMesh:
         Triangular mesh topology represented by tensors of vertices and faces. This class is based
         almost entirely on surfa.mesh, but with tensors instead of numpy arrays for gpu support.
         """
+        self.device = torch.device(
+            'cuda' if device == 'gpu' or device == 'cuda' and torch.cuda.is_available() else 'cpu'
+        ) if not isinstance(device, torch.device) else device
         
         # Store data from mesh
         self.mesh = mesh
-        self.verts = torch.tensor(mesh.vertices, dtype=torch.double)
-        self.tris = torch.tensor(mesh.faces)
+        self.verts = torch.tensor(mesh.vertices, dtype=torch.double).to(self.device)
+        self.tris = torch.tensor(mesh.faces).to(self.device)
+
+        if verts_requires_grad:
+            self.verts.requires_grad = True
 
         self.nverts = len(mesh.vertices)
         self.ntris = len(mesh.faces)
@@ -54,11 +56,8 @@ class TensorMesh:
         if compute_proximity_tree:
             self.proximity_ratio = proximity_ratio
             self._compute_proximity_trees()
-        else:
-            self.vert_proximity = None
-
+            
         # Set everything to correct device and compute vertex properties
-        self._set_device(device, verts_requires_grad=verts_requires_grad)
         self._update_vert_properties()
 
 
@@ -78,7 +77,10 @@ class TensorMesh:
         )
         self.vert_tris = pad_sequence(vert_tris, batch_first=True, padding_value=-1)
         self.vert_tri_idxs = pad_sequence(vert_tri_idxs, batch_first=True, padding_value=-1)
-        self.nvert_tris = (self.vert_tris != -1).sum(dim=1)
+
+        # Set device
+        self.vert_tris = self.vert_tris.to(self.device)
+        self.vert_tri_idxs = self.vert_tri_idxs.to(self.device)
         
     def _compute_neighbors(self):
         """
@@ -89,11 +91,13 @@ class TensorMesh:
             torch.unique(self.tris[self.vert_tris[v][self.vert_tris[v] != -1]].flatten())
             for v in range(self.nverts)
         ]
-        self.vert_neighbors_1hop = pad_sequence([
-            torch.cat([
-                torch.tensor([v]), vert_neighbors_1hop[v][torch.where(vert_neighbors_1hop[v] != v)]
-            ]) for v in range(self.nverts)
-        ], batch_first=True, padding_value=-1)
+        self.vert_neighbors_1hop = pad_sequence(
+            [torch.cat([
+                torch.tensor([v]).to(self.device),
+                vert_neighbors_1hop[v][torch.where(vert_neighbors_1hop[v] != v)]
+            ]) for v in range(self.nverts)],
+            batch_first=True, padding_value=-1
+        ).to(self.device)
         self.vert_nneighbors_1hop = (self.vert_neighbors_1hop != -1).sum(dim=1)
 
         # Two-hop neighbors
@@ -101,11 +105,13 @@ class TensorMesh:
             torch.unique(torch.cat([vert_neighbors_1hop[u] for u in vert_neighbors_1hop[v]]))
             for v in range(self.nverts)
         ]
-        self.vert_neighbors_2hop = pad_sequence([
-            torch.cat([
-                torch.tensor([v]), vert_neighbors_2hop[v][torch.where(vert_neighbors_2hop[v] != v)]
-            ]) for v in range(self.nverts)
-        ], batch_first=True, padding_value=-1)
+        self.vert_neighbors_2hop = pad_sequence(
+            [torch.cat([
+                torch.tensor([v]).to(self.device),
+                vert_neighbors_2hop[v][torch.where(vert_neighbors_2hop[v] != v)]
+            ]) for v in range(self.nverts)],
+            batch_first=True, padding_value=-1
+        ).to(self.device)
         self.vert_nneighbors_2hop = (self.vert_neighbors_2hop != -1).sum(dim=1)
 
     def _compute_proximity_trees(self):
@@ -116,41 +122,19 @@ class TensorMesh:
         # Use the kdtree of the original surfa mesh to find all vertices within range
         max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.proximity_ratio
         close_verts = self.mesh.kdtree.query_ball_point(
-            self.mesh.vertices, max_dist, return_sorted=False
+            self.verts.detach().cpu(), max_dist, return_sorted=False
         )
         
-        self.vert_proximity = pad_sequence([
-            torch.tensor(
+        self.vert_proximity_tree = pad_sequence(
+            [torch.tensor(
                 [x for x in close_verts[v] if x not in self.vert_neighbors_2hop[v]],
                 dtype=self.vert_neighbors_2hop[v].dtype
-            ) for v in range(self.nverts)
-        ], batch_first=True, padding_value=-1)
+            ) for v in range(self.nverts)],
+            batch_first=True, padding_value=-1
+        ).to(self.device)
 
-        self.vert_nproximity = (self.vert_proximity != -1).sum(dim=1)
+        self.vert_nproximity = (self.vert_proximity_tree != -1).sum(dim=1)
         self.max_vert_nproximity = self.vert_nproximity.max().item()
-
-    def _set_device(self, device, verts_requires_grad=True):
-        """
-        Set device for all tensors necessary for downstream operations
-        """
-        self.device = torch.device(
-            'cuda' if device == 'gpu' or device == 'cuda' and torch.cuda.is_available() else 'cpu'
-        ) if not isinstance(device, torch.device) else device
-        
-        self.verts = self.verts.to(self.device)
-        self.tris = self.tris.to(self.device)
-        self.vert_tris = self.vert_tris.to(self.device)
-        self.vert_tri_idxs = self.vert_tri_idxs.to(self.device)
-        self.vert_neighbors_1hop = self.vert_neighbors_1hop.to(self.device)
-        self.vert_neighbors_2hop = self.vert_neighbors_2hop.to(self.device)
-        self.vert_nneighbors_1hop = self.vert_nneighbors_1hop.to(self.device)
-        self.vert_nneighbors_2hop = self.vert_nneighbors_2hop.to(self.device)
-
-        if verts_requires_grad:
-            self.verts.requires_grad = True
-
-        if self.vert_proximity is not None:
-            self.vert_proximity = self.vert_proximity.to(self.device)
 
     def _freeze_verts(self, freeze_idxs=None):
         """
@@ -213,7 +197,7 @@ class TensorMesh:
         ).sum(dim=1)
         self.vert_norms = (vert_norms / utils._norm(vert_norms, dim=1)).squeeze()
         
-    def _compute_vert_tangentss(self):
+    def _compute_vert_tangents(self):
         """
         Compute the tangent vectors for each vertex (used in curvature and spring energy 
         calculations)
@@ -236,8 +220,10 @@ class TensorMesh:
         Update the mesh vertices and associated properties
         """
         self.verts.data = X.data if X is not None else self.verts
+        self.mesh.vertices = X.data.detach().cpu() if X is not None else self.verts.detach().cpu()
+        
         self._compute_vert_norms()
-        self._compute_vert_tangentss()
+        self._compute_vert_tangents()
         self._compute_edge_lengths()
 
     #-----------------------------------------------------------------------------------------------
@@ -277,7 +263,7 @@ class TensorMesh:
         elif pair_type == '2hop':
             neighbors = self.vert_neighbors_2hop
         elif pair_type == 'prox':
-            neighbors = self.vert_proximity
+            neighbors = self.vert_proximity_tree
 
         nneighbors = neighbors.shape[1]
         valid_neighbors = neighbors > -1
@@ -293,13 +279,15 @@ class TensorMesh:
             utils._expand(valid_neighbors, unsqueeze_dims=(-1,), repeats=(1, 1, self.ndims)),
             self.verts[neighbors], V0
         )
-
+        
         if return_mask:
             return (Vn - V0), valid_neighbors
         else:
             return (Vn - V0)
 
-    def smooth_over_neighbors(self, vec, mask, N_avgs=1, n_hops=1, signed=True, start_idx=0):
+    def smooth_over_neighbors(
+            self, vec, mask, N_avgs=1, n_hops=1, signed=True, start_idx=0, remove_outliers=False
+    ):
         """
         Smooth an input array over neighbors
         """
@@ -308,17 +296,20 @@ class TensorMesh:
         if len(vec.shape) < 2:
             vec = vec.unsqueeze(dim=-1)
 
+        # Remove outliers?
+        if remove_outliers:
+            is_outlier = (vec > (vec.mean() + 2 * vec.std())) | (vec < (vec.mean() - 2 * vec.std()))
+            mask &= (~is_outlier).squeeze()
+
         # Parse valid neighbors
         neighbors = self.vert_neighbors_2hop if n_hops == 2 else self.vert_neighbors_1hop
         valid_neighbors = torch.where(
             (neighbors > -1) & mask.unsqueeze(dim=-1), mask[neighbors], False
         ).unsqueeze(dim=-1)
-
+        
         if start_idx > 0:
             valid_neighbors[:, :start_idx] = False
             
-        n_valid = valid_neighbors.sum(dim=1).clamp(1)
-
         # Iterative smoothing
         for _ in range(N_avgs):
             signed_mask = (
@@ -327,6 +318,9 @@ class TensorMesh:
                 ) if signed
                 else valid_neighbors
             )
+            n_valid = signed_mask.sum(dim=1).clamp(1)
             vec = torch.where(signed_mask, vec[neighbors], 0).sum(dim=1) / n_valid
-
+        
+        if remove_outliers:
+            vec[is_outlier] = vec[mask].mean()
         return vec
