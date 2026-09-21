@@ -91,12 +91,12 @@ class TensorImage:
 
         # Convert coordinates to image space and normalize for grid sampling
         grid = self.transform(coords.reshape(-1, 3), geom=geom)
-        grid = utils._unsqueeze(((2 * grid / (self.shape - 1)) - 1), dim=0, N=3).flip(dims=(-1,))
+        grid = _unsqueeze(((2 * grid / (self.shape - 1)) - 1), dim=0, N=3).flip(dims=(-1,))
         
         # Sample at normalized coords
         n = 5 - len(self.data.shape)
         values = torch.nn.functional.grid_sample(
-            utils._unsqueeze(self.data, dim=0, N=n).double(),
+            _unsqueeze(self.data, dim=0, N=n).double(),
             grid, mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N).to(self.dtype)
 
@@ -126,7 +126,7 @@ class TensorImage:
 
         # Interpolate
         values = torch.nn.functional.grid_sample(
-            utils._unsqueeze(self.data, dim=0, N=2).double(),
+            _unsqueeze(self.data, dim=0, N=2).double(),
             grid, mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N, 2 * K).float()
 
