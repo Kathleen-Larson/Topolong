@@ -62,7 +62,15 @@ class MRISPlaceSurface:
             open(self.log, 'w').close()
 
         # Set up loss dictionaries
-        weights = [l_curvature, l_intensity, l_nspring, l_tspring, l_vert_repulse, l_surf_repulse]
+        weights = [
+            l_curvature,
+            l_intensity,
+            l_location,
+            l_nspring,
+            l_tspring,
+            l_vert_repulse,
+            l_surf_repulse
+        ]
         if all(l is None for l in weights):
             utils.fatal('[MRISPlaceSurface] error: must provide at least one non-zero weighting '
                         'for possible losses')
@@ -681,20 +689,19 @@ class MRISPlaceSurface:
         valid = self.has_valid_intensity & (~self.rip_verts_flag)
         n_valid = valid.sum()
 
-        # Calculate distance to target point
-        disp = torch.zeros_like(self.target_pts).to(self.device)
-        disp[valid] = (self.target_pts[valid] - self.tmesh.verts[valid])
-        dist = disp.norm(dim=-1).unsqueeze(dim=-1)
+        # Calculate distance vector to target point
+        disp = torch.zeros_like(self.target_pts)
+        disp[valid] = self.target_pts[valid] - self.tmesh.verts[valid]
+        dist_N = (disp * self.tmesh.vert_norms).sum(dim=-1, keepdim=True)
         
-        # Project distance onto normals onto normal and smooth over neighbors
-        N_proj = dist.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
+        # Project distances onto normals and smooth over neighbors
+        N_proj = -1 * dist_N.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
         N_proj_smoothed = self.tmesh.smooth_over_neighbors(
             N_proj, mask=valid, N_avgs=self.n_grad_avgs, n_hops=1, signed=True
         )
 
         # Compute loss
-        cost = (dist ** 2).sum()
-
+        cost = (N_proj[valid] ** 2).sum()
         return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed
 
     def cost_intensity(self, weight=1., step_sz=0.1, max_delta=5.):
