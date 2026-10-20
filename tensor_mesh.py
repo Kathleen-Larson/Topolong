@@ -119,16 +119,17 @@ class TensorMesh:
         Get all vertices within a certain distance (defined by a percentage of the mesh bounding 
         box) from center vertex, excluding 1 hop neighbors (QUESTION: should it be 2 hop???)
         """
+
         # Use the kdtree of the original surfa mesh to find all vertices within range
         max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.proximity_ratio
         close_verts = self.mesh.kdtree.query_ball_point(
             self.verts.detach().cpu(), max_dist, return_sorted=False
         )
-        
+
         self.vert_proximity_tree = pad_sequence(
             [torch.tensor(
-                [x for x in close_verts[v] if x not in self.vert_neighbors_2hop[v]],
-                dtype=self.vert_neighbors_2hop[v].dtype
+                [x for x in close_verts[v] if x not in self.vert_neighbors_1hop[v]],
+                dtype=self.vert_neighbors_1hop[v].dtype
             ) for v in range(self.nverts)],
             batch_first=True, padding_value=-1
         ).to(self.device)
