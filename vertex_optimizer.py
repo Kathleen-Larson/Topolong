@@ -665,12 +665,14 @@ class MRISPlaceSurface:
         current position to X_revert until no more intersections exist. (TO-DO: implement some sort 
         of smoothing instead of just reverting).
         """
-        bad_verts = self.tmesh.detect_self_intersections(X_new)
-        
-        if bad_verts.any():
+        bad_verts = torch.ones(X_new.shape[0], dtype=torch.bool).to(self.device)
+        bad_verts = self.tmesh.detect_self_intersections(X_new, exclude_initial=True)
+
+        if bad_verts &.any():
             X_new[bad_verts] = X_old[bad_verts]
             with torch.no_grad():
                 self.tmesh._update_vert_properties(X_new)
+                
         return X_new
         
         
