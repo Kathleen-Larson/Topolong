@@ -284,7 +284,7 @@ class TensorMesh:
         )
         return vert_norm_points.transpose(1, 2)
 
-    def detect_self_intersections(self):
+    def detect_self_intersections(self, X=None):
         """
         Detects self-intersections in the mesh using the Moller-Trumbore ray-triangle intersection 
         algorithm. Returns a boolean array flagging all vertices defining bad triangles.
@@ -312,7 +312,7 @@ class TensorMesh:
             return hits                
 
         # Find all centroids within reach of eachother
-        V = self.verts.detach()
+        V = self.verts.detach() if X is None else X.detach()
         dist = (2. / 3.) * self.edge_lengths.detach().max(dim=1).values
         C = V[self.tris].mean(dim=1)
 

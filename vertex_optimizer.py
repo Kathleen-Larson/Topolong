@@ -665,7 +665,7 @@ class MRISPlaceSurface:
         current position to X_revert until no more intersections exist. (TO-DO: implement some sort 
         of smoothing instead of just reverting).
         """
-        bad_verts = self.tmesh.detect_self_intersections()
+        bad_verts = self.tmesh.detect_self_intersections(X_new)
 
         if bad_verts.any():
             breakpoint()
@@ -952,7 +952,7 @@ class MRISPlaceSurface:
 
             return L_total
     
-        # Function to calculate f and g
+        # Functions to calculate f and g
         def eval_fg(X_eval):
             with torch.no_grad():
                 X.copy_(X_eval)
