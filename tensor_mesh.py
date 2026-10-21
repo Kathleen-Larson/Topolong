@@ -349,8 +349,9 @@ class TensorMesh:
         bad_tris = torch.cat([tidxs_A[hits], tidxs_B[hits]])
         bad_verts_flag = torch.zeros(self.nverts, dtype=torch.bool).to(self.device)
         bad_verts_flag[self.tris[bad_tris].flatten()] = True
-
+        
         if exclude_initial:
+            breakpoint()
             bad_verts_flag &= ~self.is_initial_intersection
 
         return bad_verts_flag
