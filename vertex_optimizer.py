@@ -658,17 +658,16 @@ class MRISPlaceSurface:
         self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
         self.max_intersurface_nproximity = self.intersurface_proximity_tree.shape[1]
 
-    def remove_intersections(self, X_new, X_old=None):
+    def remove_intersections(self, X_new, X_old):
         """
         Detect any self-intersections in the mesh using the Moller-Trumbore ray-triangle 
         intersection algorithm. If X_revert is not None, marked vertices will be reset from their 
         current position to X_revert until no more intersections exist. (TO-DO: implement some sort 
         of smoothing instead of just reverting).
         """
-        bad_verts = torch.ones(X_new.shape[0], dtype=torch.bool).to(self.device)
         bad_verts = self.tmesh.detect_self_intersections(X_new, exclude_initial=True)
 
-        if bad_verts &.any():
+        if bad_verts.any():
             X_new[bad_verts] = X_old[bad_verts]
             with torch.no_grad():
                 self.tmesh._update_vert_properties(X_new)
