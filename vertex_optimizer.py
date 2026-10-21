@@ -37,8 +37,8 @@ class MRISPlaceSurface:
             l_vert_repulse=None,   # weighting for vertex repulsion energy loss
             l_surf_repulse=None,   # weighting for surface repulsion energy loss
             n_grad_avgs=1,      # no. averages to start for loss smoothing (intensity only)
-            vert_prox_ratio=0.05,  # % of mesh bbox to include in proximity trees (for debugging)
-            surf_prox_ratio=0.05,  # % of mesh bbox to include in proximity trees (for debugging)
+            vert_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
+            surf_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
             separate_loss_types=False,
             smoothing_sigma=2.,  #
             use_ggvf=True,
@@ -644,23 +644,6 @@ class MRISPlaceSurface:
 
         if not self.surf_prox_ratio:
             self.surf_prox_ratio = proximity_ratio
-        """
-        # Find vertices within distance bounds
-        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.surf_prox_ratio
-        close_verts = self.mesh.kdtree.query_ball_point(
-            self.tmesh_repulsion.verts.detach().cpu(), max_dist, return_sorted=False
-        )
-
-        # Store as tensor
-        nv = self.tmesh.nverts
-        self.intersurface_proximity_tree = pad_sequence(
-            [torch.tensor([x for x in close_verts[v]], dtype=torch.long) for v in range(nv)],
-            batch_first=True, padding_value=-1
-        ).to(self.device)
-
-        self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
-        self.max_intersurface_nproximity = self.intersurface_nproximity.max().item()
-        """
 
         # Query tree
         max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.surf_prox_ratio
@@ -675,6 +658,21 @@ class MRISPlaceSurface:
         self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
         self.max_intersurface_nproximity = self.intersurface_proximity_tree.shape[1]
 
+    def remove_intersections(self, X_new, X_old=None):
+        """
+        Detect any self-intersections in the mesh using the Moller-Trumbore ray-triangle 
+        intersection algorithm. If X_revert is not None, marked vertices will be reset from their 
+        current position to X_revert until no more intersections exist. (TO-DO: implement some sort 
+        of smoothing instead of just reverting).
+        """
+        bad_verts = self.tmesh.detect_self_intersections()
+
+        if bad_verts.any():
+            breakpoint()
+
+        return X_new
+        
+        
     # COST FUNCTIONS -------------------------------------------------------------------------------
 
     def cost_curvature(self, weight=1.):
@@ -850,7 +848,7 @@ class MRISPlaceSurface:
 
         # Update proximity tree
         with torch.no_grad():
-            self.tmesh._compute_proximity_trees()
+            self.tmesh._compute_proximity_tree()
         
         # Distance between vertices in each other's proximity trees
         disps, valid = self.tmesh.neighbor_displacements(
@@ -1006,6 +1004,8 @@ class MRISPlaceSurface:
 
                 for _ in range(max_iters):
                     Xt = X0 + t * d
+                    Xt = self.remove_intersections(Xt, X0)
+                    
                     ft, gt = eval_fg(Xt)
                     gtd = (gt * d).sum()
 
@@ -1027,12 +1027,14 @@ class MRISPlaceSurface:
 
                     t, ft, gt = t0, f0, g0
                     Xt = X0 + t * d
+                    Xt = self.remove_intersections(Xt, X0)
                     eval_fg(Xt)
 
 
             else:
                 for _ in range(max_iters):
                     Xt = X0 + t * d
+                    Xt = self.remove_intersections(Xt, X0)
                     ft, gt = eval_fg(Xt)
                     if ft <= f + c1 * t * gd:
                         break
@@ -1145,7 +1147,7 @@ class MRISPlaceSurface:
             if self.verbose:
                 if self.log is not None:
                     with open(self.log, 'a') as log:
-                        log.write(f'Iteration {i + 1}:')
+                        log.write(f'Iteration {i + 1}:\n')
                 else:
                     print(f'Iteration {i + 1}:')
 
@@ -1159,7 +1161,7 @@ class MRISPlaceSurface:
             if i < (max_steps - 1):
                 if 'cost_vertex_repulsion' in self.losses_dict:
                     with torch.no_grad():
-                        self.tmesh._compute_proximity_trees()
+                        self.tmesh._compute_proximity_tree()
                 
                 if 'cost_surface_repulsion' in self.losses_dict:
                     with torch.no_grad():
