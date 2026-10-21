@@ -986,8 +986,8 @@ class MRISPlaceSurface:
                 alphas.append(a)
             if S:
                 q *= (S[-1] * Y[-1]).sum() / (Y[-1] * Y[-1]).sum()
-                for (s, y, r), a in zip(zip(S, Y, rho), reversed(alphas)):
-                    q += s * (a - r * (y * q).sum())
+            for (s, y, r), a in zip(zip(S, Y, rho), reversed(alphas)):
+                q += s * (a - r * (y * q).sum())
             d = -q
 
             # Check if valid search direction
