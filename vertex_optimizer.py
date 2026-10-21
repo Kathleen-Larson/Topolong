@@ -947,8 +947,8 @@ class MRISPlaceSurface:
                 if n_losses > 1:
                     loss_str = f'{L_total.item():>.2e} = ' + loss_str
                 if self.log is not None:
-                    with open(self.log, 'a') as f:
-                        f.write(f'{loss_str}\n')
+                    with open(self.log, 'a') as log:
+                        log.write(f'{loss_str}\n')
                 else:
                     print('Loss =', loss_str)
 
@@ -968,11 +968,11 @@ class MRISPlaceSurface:
         S, Y, rho = [], [], []
 
         # Do the 2 loop recursive optimizing
-        for i in range(max_iters):
+        for i in range(max_steps):
             if self.verbose:
                 if self.log is not None:
-                    with open(self.log, 'a') as f:
-                        f.write(f'Iteration {i + 1}:')
+                    with open(self.log, 'a') as log:
+                        log.write(f'Iteration {i + 1}:')
                 else:
                     print(f'Iteration {i + 1}:')
                     
@@ -1031,7 +1031,7 @@ class MRISPlaceSurface:
 
 
             else:
-                for _ in range(max_steps):
+                for _ in range(max_iters):
                     Xt = X0 + t * d
                     ft, gt = eval_fg(Xt)
                     if ft <= f + c1 * t * gd:
@@ -1118,8 +1118,8 @@ class MRISPlaceSurface:
                 if n_losses > 1:
                     loss_str = f'{L_total.item():>.2e} = ' + loss_str
                 if self.log is not None:
-                    with open(self.log, 'a') as f:
-                        f.write(f'{loss_str}\n')
+                    with open(self.log, 'a') as log:
+                        log.write(f'{loss_str}\n')
                 else:
                     print('Loss =', loss_str)
             
@@ -1144,8 +1144,8 @@ class MRISPlaceSurface:
         for i in range(max_steps):
             if self.verbose:
                 if self.log is not None:
-                    with open(self.log, 'a') as f:
-                        f.write(f'Iteration {i + 1}:')
+                    with open(self.log, 'a') as log:
+                        log.write(f'Iteration {i + 1}:')
                 else:
                     print(f'Iteration {i + 1}:')
 
