@@ -666,10 +666,11 @@ class MRISPlaceSurface:
         of smoothing instead of just reverting).
         """
         bad_verts = self.tmesh.detect_self_intersections(X_new)
-
+        
         if bad_verts.any():
-            breakpoint()
-
+            X_new[bad_verts] = X_old[bad_verts]
+            with torch.no_grad():
+                self.tmesh._update_vert_properties(X_new)
         return X_new
         
         
