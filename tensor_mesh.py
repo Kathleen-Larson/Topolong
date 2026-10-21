@@ -284,7 +284,7 @@ class TensorMesh:
         )
         return vert_norm_points.transpose(1, 2)
 
-    def detect_self_intersections(self, X=None):
+    def detect_self_intersections(self, X=None, exclude_initial=False):
         """
         Detects self-intersections in the mesh using the Moller-Trumbore ray-triangle intersection 
         algorithm. Returns a boolean array flagging all vertices defining bad triangles.
@@ -313,7 +313,9 @@ class TensorMesh:
 
         # Find all centroids within reach of eachother
         V = self.verts.detach() if X is None else X.detach()
-        dist = (2. / 3.) * self.edge_lengths.detach().max(dim=1).values
+        dist = (2. / 3.) * (
+            V[self.tris][:, [1, 2, 0]] - V[self.tris]
+        ).norm(dim=-1).max(dim=1).values
         C = V[self.tris].mean(dim=1)
 
         pairs = torch.from_numpy(
@@ -347,6 +349,9 @@ class TensorMesh:
         bad_tris = torch.cat([tidxs_A[hits], tidxs_B[hits]])
         bad_verts_flag = torch.zeros(self.nverts, dtype=torch.bool).to(self.device)
         bad_verts_flag[self.tris[bad_tris].flatten()] = True
+
+        if exclude_initial:
+            bad_verts_flag &= ~self.is_initial_intersection
 
         return bad_verts_flag
 
