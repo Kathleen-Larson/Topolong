@@ -6,6 +6,8 @@ import time
 
 from torch.nn.utils.rnn import pad_sequence
 
+from scipy.spatial import cKDTree
+
 import utils
 from tensor_mesh import TensorMesh
 from tensor_image import TensorImage, GGVF
@@ -147,6 +149,8 @@ class MRISPlaceSurface:
                 else in_white.copy() if in_pial is None
                 else in_pial.copy()
             )
+            self.repulsion_kdtree = cKDTree(mesh_repulse.vertices)
+
             self.tmesh_repulsion = TensorMesh(
                 mesh_repulse, compute_proximity_tree=False, device=self.device
             )
@@ -357,20 +361,25 @@ class MRISPlaceSurface:
         pts[:, n_steps, :] = self.tmesh.verts
 
         def build_ggvf_profile(sign=1):
+            R = self.timage.transform_dict['vox2surf']['rotation']
+
+            # Initialize points
             x = torch.zeros((n_valid, n_steps + 1, 3)).to(self.device)
             x[:, 0, :] = self.tmesh.verts[valid].clone()
-            x_vox = self.timage.transform(x[:, 0, :], geom='surf2vox')
-
+            #x_vox = self.timage.transform(x[:, 0, :], geom='surf2vox')
+            
             for n in range(n_steps):
                 # Interpolate GGVF field at verts
                 xn = x[:, n, :]
                 field = self.ggvf.interpolate(xn).transpose(0, 1)
+                field = field.to(R.dtype) @ R.T
                 mag = field.norm(dim=-1, keepdim=True)
-                dirs = sign * step_sz * (field / mag.clamp(min=eps))
-
+                dirs = step_sz * (field / mag.clamp(min=eps))
+                
                 # Update search position
-                x_vox = self.timage.transform(xn, geom='surf2vox') + dirs
-                x[:, n + 1, :] = self.timage.transform(x_vox, geom='vox2surf')
+                x[:, n + 1, :] = xn + sign * step_sz * (field / mag.clamp(min=eps))
+                #x_vox = self.timage.transform(xn, geom='surf2vox') + dirs
+                #x[:, n + 1, :] = self.timage.transform(x_vox, geom='vox2surf')
 
             return x[:, 1:, :]
 
@@ -625,7 +634,6 @@ class MRISPlaceSurface:
         self.target_intensities = self.tmesh.smooth_over_neighbors(
             self.target_intensities, mask=self.has_valid_intensity, N_avgs=5, n_hops=1, signed=False
         )
-        breakpoint()
 
     def _compute_intersurface_proximity_tree(self, proximity_ratio=0.05):
         """
@@ -636,7 +644,7 @@ class MRISPlaceSurface:
 
         if not self.surf_prox_ratio:
             self.surf_prox_ratio = proximity_ratio
-
+        """
         # Find vertices within distance bounds
         max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.surf_prox_ratio
         close_verts = self.mesh.kdtree.query_ball_point(
@@ -652,6 +660,20 @@ class MRISPlaceSurface:
 
         self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
         self.max_intersurface_nproximity = self.intersurface_nproximity.max().item()
+        """
+
+        # Query tree
+        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.surf_prox_ratio
+        dist, idx = self.repulsion_kdtree.query(
+            self.tmesh.verts.detach().cpu().numpy(), k=64, distance_upper_bound=max_dist, workers=-1
+        )
+        idx = np.where(np.isinf(dist), -1, idx)
+        idx = idx[:, (idx >= 0).any(axis=0)]
+
+        # Store
+        self.intersurface_proximity_tree = torch.from_numpy(idx).long().to(self.device)
+        self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
+        self.max_intersurface_nproximity = self.intersurface_proximity_tree.shape[1]
 
     # COST FUNCTIONS -------------------------------------------------------------------------------
 
@@ -740,19 +762,26 @@ class MRISPlaceSurface:
         I = self.target_intensities.clone()
         I[valid] = self.timage.interpolate(self.tmesh.verts[valid], geom='surf2vox').transpose(0, 1)
         delta_I = (self.target_intensities - I)
+
+        # Get sign
+        g = self.ggvf.interpolate(self.tmesh.verts[valid], geom='surf2vox').transpose(0, 1)
+        g = g @ (self.timage.transform_dict['vox2surf']['rotation'].T).to(g.dtype)
+
+        sgn = torch.ones_like(delta_I)
+        sgn[valid] = torch.where(
+            (g * self.tmesh.vert_norms[valid]).sum(dim=-1, keepdim=True) > 0, -1., 1.
+        )
         
         if self.separate_loss_types:
             # Project differences onto normal and smooth over neighbors
-            N_proj = delta_I * self.tmesh.vert_norms 
-            #N_proj = delta_I.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
+            N_proj = sgn * delta_I * self.tmesh.vert_norms 
             N_proj_smoothed = self.tmesh.smooth_over_neighbors(
                 N_proj, mask=valid, N_avgs=self.n_grad_avgs, n_hops=1, signed=True
             )
 
-            # Compute loss
+            # Compute loss/gradient
             cost = (delta_I ** 2).sum()
             #print(f'---- target: {self.target_intensities[vno].item():.2f}, I: {I[vno].item():.2f}')
-
             return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed
 
         else:
@@ -776,6 +805,10 @@ class MRISPlaceSurface:
         - dot is dot product between dxyz and normal
         - dxyz is distance between coords in bin
         """
+        # Update proximity tree
+        with torch.no_grad():
+            self._compute_intersurface_proximity_tree()
+        
         # Get distances between each vertex and another mesh
         valid_verts = self.intersurface_proximity_tree > -1
         valid_verts &= (~self.rip_verts_flag)[self.intersurface_proximity_tree]
@@ -815,6 +848,10 @@ class MRISPlaceSurface:
         repulse_k = 1.
         repulse_e = 0.25
 
+        # Update proximity tree
+        with torch.no_grad():
+            self.tmesh._compute_proximity_trees()
+        
         # Distance between vertices in each other's proximity trees
         disps, valid = self.tmesh.neighbor_displacements(
             pair_type='prox', exclude_ripped=True, return_mask=True
@@ -855,22 +892,183 @@ class MRISPlaceSurface:
         return (0.5 / n_valid) * ((weight[0] * spring_N) + (weight[1] * spring_T)).sum()
     
     # OPTIMIZERS -----------------------------------------------------------------------------------
-    def lbfgs_optimize(self, lr=1., history_size=10, max_iters=10, max_steps=50):
+    def lbfgs_optimize(
+            self,
+            history_size=10,
+            max_iters=10,
+            max_steps=50,
+            line_search_fn=None,
+            c1=1e-4,
+            c2=0.9,
+            t_max=1e3
+    ):
         """
-        Vertex placement with LBFGS optimizer
+        Vertex placement with custom LBFGS optimizer
         """
-        # Closure function that computes at each iteration
+        self.losses_dict = self.manual_grad_losses_dict | self.autograd_losses_dict
+        n_losses = len(self.losses_dict)
+            
+        # Closure function
         def closure():
-            self.losses_dict = self.manual_grad_losses_dict | self.autograd_losses_dict
-            n_losses = len(self.losses_dict)
-            n_printed = 0
-            
-            opt.zero_grad()
-            self.tmesh._update_vert_properties(X)
-            
             loss_str = '' if self.verbose else None
             n_printed = 0
 
+            self.tmesh._update_vert_properties(X)
+            L_total = X.new_zeros(())
+
+            # Gradient contributions w/ autograd
+            for func, weight in self.autograd_losses_dict.items():
+                loss = eval(f'self.{func}(weight)')
+                L_total = L_total + loss
+
+                if self.verbose:
+                    if n_printed > 0:
+                        loss_str += ' + '
+                    loss_str += f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
+                    n_printed += 1
+
+            # Manually do the rest (probably just intensity)
+            for func, weight in self.manual_grad_losses_dict.items():
+                loss, grad = eval(f'self.{func}(weight)')
+                L_total = L_total + _ManualGradTerm.apply(X, loss.detach(), grad.detach())
+                
+                if self.verbose:
+                    if n_printed > 0:
+                        loss_str += ' + '
+                    loss_str += f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
+                    n_printed += 1
+
+            # Back-propagate
+            L_total.backward()
+            with torch.no_grad():
+                X.grad[self.rip_verts_flag] = 0
+
+            if self.verbose:
+                if n_losses > 1:
+                    loss_str = f'{L_total.item():>.2e} = ' + loss_str
+                if self.log is not None:
+                    with open(self.log, 'a') as f:
+                        f.write(f'{loss_str}\n')
+                else:
+                    print('Loss =', loss_str)
+
+            return L_total
+    
+        # Function to calculate f and g
+        def eval_fg(X_eval):
+            with torch.no_grad():
+                X.copy_(X_eval)
+            X.grad = None
+            f = closure()
+            return f.detach(), X.grad.detach().clone()
+
+        # Initialize
+        X = self.tmesh.verts
+        f, g = eval_fg(X.detach().clone())
+        S, Y, rho = [], [], []
+
+        # Do the 2 loop recursive optimizing
+        for i in range(max_iters):
+            if self.verbose:
+                if self.log is not None:
+                    with open(self.log, 'a') as f:
+                        f.write(f'Iteration {i + 1}:')
+                else:
+                    print(f'Iteration {i + 1}:')
+                    
+            q = g.clone()
+            alphas = []
+
+            # Calculate search direction
+            for s, y, r in reversed(list(zip(S, Y, rho))):
+                a = r * (s * q).sum()
+                q -= a * y
+                alphas.append(a)
+            if S:
+                q *= (S[-1] * Y[-1]).sum() / (Y[-1] * Y[-1]).sum()
+                for (s, y, r), a in zip(zip(S, Y, rho), reversed(alphas)):
+                    q += s * (a - r * (y * q).sum())
+            d = -q
+
+            # Check if valid search direction
+            gd = (g * d).sum()
+            if gd >= 0:
+                d, gd = -g, -(g * g).sum()
+                S, Y, rho = [], [], []
+            
+            # Line search
+            X0 = X.detach().clone()
+            t = min(1., 1. / g.abs().sum().item()) if not S else 1.
+            
+            if line_search_fn == 'strong_wolfe':
+                t0, f0, g0 = 0., f, g
+                t1 = float('inf')
+
+                for _ in range(max_iters):
+                    Xt = X0 + t * d
+                    ft, gt = eval_fg(Xt)
+                    gtd = (gt * d).sum()
+
+                    if ft > f + c1 * t * gd or ft >= f0:
+                        t1 = t
+                    elif gtd.abs() <= -c2 * gd:
+                        break
+                    else:
+                        if gtd * (t1 - t0) >= 0:
+                            t1 = t0
+                        t0, f0, g0 = t, ft, gt
+
+                    t = 0.5 * (t0 + t1) if t1 < float('inf') else min(2. * t, t_max)
+
+                else:
+                    if t0 == 0:
+                        eval_fg(X0)
+                        break
+
+                    t, ft, gt = t0, f0, g0
+                    Xt = X0 + t * d
+                    eval_fg(Xt)
+
+
+            else:
+                for _ in range(max_steps):
+                    Xt = X0 + t * d
+                    ft, gt = eval_fg(Xt)
+                    if ft <= f + c1 * t * gd:
+                        break
+                    t *= 0.5
+                else:
+                    eval_fg(X0)
+                    break
+            
+            # Update history
+            s, y = Xt - X0, gt - g
+            sy = (s * y).sum()
+            if sy > 1e-10:
+                S.append(s); Y.append(y); rho.append(1. / sy)
+                if len(S) > history_size:
+                    S.pop(0); Y.pop(0); rho.pop(0)
+            f, g = ft, gt
+
+        # Finish and exit
+        self.mesh.vertices = self.tmesh.verts.detach().cpu()
+
+
+
+
+        
+    def lbfgs_optimize_torch(self, lr=1., history_size=10, max_iters=10, max_steps=50):
+        """
+        Vertex placement with pytorch LBFGS optimizer
+        """
+        self.losses_dict = self.manual_grad_losses_dict | self.autograd_losses_dict
+        n_losses = len(self.losses_dict)
+
+        X = self.tmesh.verts
+        
+        # Closure function that computes at each iteration
+        def closure():
+            self.tmesh._update_vert_properties(X)
             L_total = X.new_zeros(())
             
             if self.separate_loss_types:
@@ -957,6 +1155,7 @@ class MRISPlaceSurface:
             #print(f'{((X[vno] - v) * self.tmesh.vert_norms[vno]).sum():.3f}, {((X[vno] - v) ** 2).sum().sqrt():.3f}')
             
             # Refresh cached properties
+            """
             if i < (max_steps - 1):
                 if 'cost_vertex_repulsion' in self.losses_dict:
                     with torch.no_grad():
@@ -965,7 +1164,7 @@ class MRISPlaceSurface:
                 if 'cost_surface_repulsion' in self.losses_dict:
                     with torch.no_grad():
                         self._compute_intersurface_proximity_tree()
-                
+            """
             """    
             if 'cost_intensity' in self.losses_dict:
                 with torch.no_grad():
