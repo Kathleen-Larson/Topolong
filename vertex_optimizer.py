@@ -900,7 +900,7 @@ class MRISPlaceSurface:
             line_search_fn=None,
             c1=1e-4,
             c2=0.9,
-            t_max=1e3
+            max_disp=0.3,
     ):
         """
         Vertex placement with custom LBFGS optimizer
@@ -998,7 +998,10 @@ class MRISPlaceSurface:
             
             # Line search
             X0 = X.detach().clone()
-            t = min(1., 1. / g.abs().sum().item()) if not S else 1.
+            dmax = d.norm(dim=-1).max().clamp(min=1e-12).item()
+            t = min(1., max_disp / dmax)
+            t_max = max_disp / dmax
+            #t = min(1., 1. / g.abs().sum().item()) if not S else 1.
             
             if line_search_fn == 'strong_wolfe':
                 t0, f0, g0 = 0., f, g
@@ -1006,6 +1009,7 @@ class MRISPlaceSurface:
 
                 for _ in range(max_iters):
                     Xt = X0 + t * d
+                    #print(d.norm(dim=-1).max().item(), t)
                     Xt = self.remove_intersections(Xt, X0)
                     
                     ft, gt = eval_fg(Xt)
