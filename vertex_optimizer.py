@@ -774,15 +774,14 @@ class MRISPlaceSurface:
         
         if self.separate_loss_types:
             # Project differences onto normal and smooth over neighbors
-            N_proj = sgn * delta_I * self.tmesh.vert_norms 
+            N_proj = sgn * delta_I.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
             N_proj_smoothed = self.tmesh.smooth_over_neighbors(
                 N_proj, mask=valid, N_avgs=self.n_grad_avgs, n_hops=1, signed=True
             )
 
             # Compute loss/gradient
             cost = (delta_I ** 2).sum()
-            #print(f'---- target: {self.target_intensities[vno].item():.2f}, I: {I[vno].item():.2f}')
-            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed / n_valid
+            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed #/ n_valid
 
         else:
             # Compute loss
@@ -895,7 +894,7 @@ class MRISPlaceSurface:
     def lbfgs_optimize(
             self,
             history_size=10,
-            max_iters=10,
+            max_iters=25,
             max_steps=50,
             line_search_fn=None,
             c1=1e-4,
@@ -967,6 +966,8 @@ class MRISPlaceSurface:
         f, g = eval_fg(X.detach().clone())
         S, Y, rho = [], [], []
 
+        max_iters = 25
+        
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
             if self.verbose:
@@ -999,10 +1000,12 @@ class MRISPlaceSurface:
             # Line search
             X0 = X.detach().clone()
             dmax = d.norm(dim=-1).max().clamp(min=1e-12).item()
-            t = min(1., max_disp / dmax)
+
+            max_disp = float('inf')
             t_max = max_disp / dmax
-            #t = min(1., 1. / g.abs().sum().item()) if not S else 1.
-            #t_max = 1e3
+            
+            t = min(1., 1. / g.abs().sum().item()) if not S else 1.
+
             if line_search_fn == 'strong_wolfe':
                 t0, f0, g0 = 0., f, g
                 t1 = float('inf')
@@ -1010,7 +1013,7 @@ class MRISPlaceSurface:
                 for _ in range(max_iters):
                     Xt = X0 + t * d
                     #print(d.norm(dim=-1).max().item(), t)
-                    Xt = self.remove_intersections(Xt, X0)
+                    #Xt = self.remove_intersections(Xt, X0)
                     
                     ft, gt = eval_fg(Xt)
                     gtd = (gt * d).sum()
@@ -1033,14 +1036,14 @@ class MRISPlaceSurface:
 
                     t, ft, gt = t0, f0, g0
                     Xt = X0 + t * d
-                    Xt = self.remove_intersections(Xt, X0)
+                    #Xt = self.remove_intersections(Xt, X0)
                     eval_fg(Xt)
 
 
             else:
                 for _ in range(max_iters):
                     Xt = X0 + t * d
-                    Xt = self.remove_intersections(Xt, X0)
+                    #Xt = self.remove_intersections(Xt, X0)
                     ft, gt = eval_fg(Xt)
                     if ft <= f + c1 * t * gd:
                         break
@@ -1072,10 +1075,11 @@ class MRISPlaceSurface:
         self.losses_dict = self.manual_grad_losses_dict | self.autograd_losses_dict
         n_losses = len(self.losses_dict)
 
-        X = self.tmesh.verts
-        
-        # Closure function that computes at each iteration
+        # Closure function
         def closure():
+            loss_str = '' if self.verbose else None
+            n_printed = 0
+
             self.tmesh._update_vert_properties(X)
             L_total = X.new_zeros(())
             
