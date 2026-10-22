@@ -781,7 +781,7 @@ class MRISPlaceSurface:
 
             # Compute loss/gradient
             cost = (delta_I ** 2).sum()
-            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed #/ n_valid
+            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed / n_valid
 
         else:
             # Compute loss
@@ -899,7 +899,7 @@ class MRISPlaceSurface:
             line_search_fn=None,
             c1=1e-4,
             c2=0.9,
-            max_disp=1.0,
+            max_disp=0.3,
     ):
         """
         Vertex placement with custom LBFGS optimizer
@@ -966,8 +966,8 @@ class MRISPlaceSurface:
         f, g = eval_fg(X.detach().clone())
         S, Y, rho = [], [], []
 
-        max_iters = 25
-        
+        max_steps *= max_iters
+
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
             if self.verbose:
@@ -1063,8 +1063,6 @@ class MRISPlaceSurface:
 
         # Finish and exit
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
-
-
 
 
         
