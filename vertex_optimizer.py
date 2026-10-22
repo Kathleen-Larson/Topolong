@@ -782,7 +782,7 @@ class MRISPlaceSurface:
             # Compute loss/gradient
             cost = (delta_I ** 2).sum()
             #print(f'---- target: {self.target_intensities[vno].item():.2f}, I: {I[vno].item():.2f}')
-            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed
+            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed / n_valid
 
         else:
             # Compute loss
@@ -900,7 +900,7 @@ class MRISPlaceSurface:
             line_search_fn=None,
             c1=1e-4,
             c2=0.9,
-            max_disp=0.3,
+            max_disp=1.0,
     ):
         """
         Vertex placement with custom LBFGS optimizer
@@ -1002,7 +1002,7 @@ class MRISPlaceSurface:
             t = min(1., max_disp / dmax)
             t_max = max_disp / dmax
             #t = min(1., 1. / g.abs().sum().item()) if not S else 1.
-            
+            #t_max = 1e3
             if line_search_fn == 'strong_wolfe':
                 t0, f0, g0 = 0., f, g
                 t1 = float('inf')
