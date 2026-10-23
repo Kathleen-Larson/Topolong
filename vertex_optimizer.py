@@ -787,8 +787,13 @@ class MRISPlaceSurface:
             )
 
             # Compute loss/gradient
-            cost = (delta_I ** 2).sum()
-            return weight * (0.5) * cost, weight * N_proj_smoothed
+            #cost = (delta_I ** 2).sum()
+            cost = torch.where(
+                delta_I.abs() <= max_delta,
+                0.5 * (delta_I.abs() ** 2),
+                max_delta * (delta_I.abs() - 0.5 * max_delta)
+            ).sum()
+            return weight * (1. / n_valid) * cost, weight * N_proj_smoothed / n_valid
 
         else:
             # Compute loss
@@ -919,7 +924,6 @@ class MRISPlaceSurface:
             loss_str = '' if self.verbose else None
             n_printed = 0
 
-            X.grad = None
             self.tmesh._update_vert_properties(X)
             L_total = X.new_zeros(())
 
