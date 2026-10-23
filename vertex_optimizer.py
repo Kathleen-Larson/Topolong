@@ -658,21 +658,28 @@ class MRISPlaceSurface:
         self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
         self.max_intersurface_nproximity = self.intersurface_proximity_tree.shape[1]
 
-    def remove_intersections(self, X_new, X_old):
+    def remove_intersections(self, X, X0=None):
         """
         Detect any self-intersections in the mesh using the Moller-Trumbore ray-triangle 
         intersection algorithm. If X_revert is not None, marked vertices will be reset from their 
         current position to X_revert until no more intersections exist. (TO-DO: implement some sort 
         of smoothing instead of just reverting).
         """
-        bad_verts = self.tmesh.detect_self_intersections(X_new, exclude_initial=True)
+        with torch.no_grad():
+            bad_verts = self.tmesh.detect_self_intersections(X, exclude_initial=True)
 
-        if bad_verts.any():
-            X_new[bad_verts] = X_old[bad_verts]
-            with torch.no_grad():
-                self.tmesh._update_vert_properties(X_new)
+            if bad_verts.any():
+                if X0 is None:
+                    # Laplacian smoothing
+                    self.tmesh.smooth_verts(idxs=torch.where(bad_verts)[0])
+                    
+                    breakpoint()
+                else:
+                    # Just replace them
+                    X[bad_verts] = X0[bad_verts]
+                    self.tmesh._update_vert_properties(X0)
                 
-        return X_new
+        #return X
         
         
     # COST FUNCTIONS -------------------------------------------------------------------------------
@@ -781,7 +788,7 @@ class MRISPlaceSurface:
 
             # Compute loss/gradient
             cost = (delta_I ** 2).sum()
-            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed / n_valid
+            return weight * (0.5) * cost, weight * N_proj_smoothed
 
         else:
             # Compute loss
@@ -912,6 +919,7 @@ class MRISPlaceSurface:
             loss_str = '' if self.verbose else None
             n_printed = 0
 
+            X.grad = None
             self.tmesh._update_vert_properties(X)
             L_total = X.new_zeros(())
 
@@ -1001,11 +1009,13 @@ class MRISPlaceSurface:
             X0 = X.detach().clone()
             dmax = d.norm(dim=-1).max().clamp(min=1e-12).item()
 
-            max_disp = float('inf')
-            t_max = max_disp / dmax
-            
-            t = min(1., 1. / g.abs().sum().item()) if not S else 1.
+            #max_disp = float('inf')
+            #t_max = max_disp / dmax            
+            #t = min(1., 1. / g.abs().sum().item()) if not S else 1.
 
+            t_max = max_disp / dmax
+            t = min(1., t_max)
+            
             if line_search_fn == 'strong_wolfe':
                 t0, f0, g0 = 0., f, g
                 t1 = float('inf')
@@ -1078,6 +1088,7 @@ class MRISPlaceSurface:
             loss_str = '' if self.verbose else None
             n_printed = 0
 
+            opt.zero_grad()
             self.tmesh._update_vert_properties(X)
             L_total = X.new_zeros(())
             
@@ -1161,6 +1172,7 @@ class MRISPlaceSurface:
 
             # Closure function
             opt.step(closure)
+            #self.remove_intersections(X)
             
             #print(f'{((X[vno] - v) * self.tmesh.vert_norms[vno]).sum():.3f}, {((X[vno] - v) ** 2).sum().sqrt():.3f}')
             
