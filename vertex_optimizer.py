@@ -903,6 +903,35 @@ class MRISPlaceSurface:
         return (0.5 / n_valid) * ((weight[0] * spring_N) + (weight[1] * spring_T)).sum()
     
     # OPTIMIZERS -----------------------------------------------------------------------------------
+    def gradient_report(self):
+        """
+        Per-term gradient magnitudes at the current vertex positions
+        """
+        X = self.tmesh.verts
+        with torch.no_grad():
+            self.tmesh._update_vert_properties(X)
+        keep = ~self.tmesh.rip_verts_flag
+
+        grads = {}
+        for func, weight in self.autograd_losses_dict.items():
+            X.grad = None
+            eval(f'self.{func}(weight)').backward()
+            grads[func] = X.grad[keep].detach().clone()
+        for func, weight in self.manual_grad_losses_dict.items():
+            _, grad = eval(f'self.{func}(weight)')
+            grads[func] = grad[keep].detach().clone()
+            X.grad = None
+
+        total = sum(grads.values())
+        total_norm = total.norm()
+        print(f'{"term":>25} {"median":>9} {"p95":>9} {"max":>9} {"share":>6} {"cos":>6}')
+        for func, g in grads.items():
+            gn = g.norm(dim=-1)
+            share = g.norm() / sum(v.norm() for v in grads.values())
+            cos = (g * total).sum() / (g.norm() * total_norm).clamp(min=1e-20)
+            print(f'{func:>25} {gn.median():9.2e} {gn.quantile(0.95):9.2e} {gn.max():9.2e} '
+                  f'{share:6.2f} {cos:6.2f}')
+
     def lbfgs_optimize(
             self,
             history_size=10,
@@ -924,6 +953,7 @@ class MRISPlaceSurface:
             loss_str = '' if self.verbose else None
             n_printed = 0
 
+            X.grad = None
             self.tmesh._update_vert_properties(X)
             L_total = X.new_zeros(())
 
@@ -971,14 +1001,18 @@ class MRISPlaceSurface:
                 X.copy_(X_eval)
             X.grad = None
             f = closure()
-            return f.detach(), X.grad.detach().clone()
+            #return f.detach(), X.grad.detach().clone()
+            f = closure()
+            g = X.grad.detach().clone()
+            #self.gradient_report()
+            return f.detach(), g
 
         # Initialize
         X = self.tmesh.verts
         f, g = eval_fg(X.detach().clone())
         S, Y, rho = [], [], []
 
-        max_steps *= max_iters
+        #max_steps *= max_iters
 
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
@@ -1040,6 +1074,9 @@ class MRISPlaceSurface:
                         if gtd * (t1 - t0) >= 0:
                             t1 = t0
                         t0, f0, g0 = t, ft, gt
+                        if t1 == float('inf') and t >= t_max:
+                            break
+
 
                     t = 0.5 * (t0 + t1) if t1 < float('inf') else min(2. * t, t_max)
 
@@ -1177,6 +1214,7 @@ class MRISPlaceSurface:
             # Closure function
             opt.step(closure)
             #self.remove_intersections(X)
+            self.gradient_report()
             
             #print(f'{((X[vno] - v) * self.tmesh.vert_norms[vno]).sum():.3f}, {((X[vno] - v) ** 2).sum().sqrt():.3f}')
             
