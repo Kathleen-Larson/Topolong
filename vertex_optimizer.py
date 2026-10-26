@@ -84,17 +84,18 @@ class MRISPlaceSurface:
             self.manual_grad_losses_dict['cost_intensity'] = l_intensity
         if l_location is not None and l_location > 0:
             self.manual_grad_losses_dict['cost_location'] = l_location
+        if l_surf_repulse is not None and l_surf_repulse > 0:
+            self.manual_grad_losses_dict['cost_surface_repulsion'] = l_surf_repulse
 
         do_intensity_loss = 'cost_intensity' in self.manual_grad_losses_dict.keys()
         do_location_loss = 'cost_location' in self.manual_grad_losses_dict.keys()
+        do_surface_repulsion_loss = 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys()
             
         self.autograd_losses_dict = {}
         if l_curvature is not None and l_curvature > 0:
             self.autograd_losses_dict['cost_curvature'] = l_curvature
         if l_vert_repulse is not None and l_vert_repulse > 0:
             self.autograd_losses_dict['cost_vertex_repulsion'] = l_vert_repulse
-        if l_surf_repulse is not None and l_surf_repulse > 0:
-            self.autograd_losses_dict['cost_surface_repulsion'] = l_surf_repulse
             
         if (l_nspring is not None and l_nspring > 0) or (l_tspring is not None and l_tspring > 0):
             self.autograd_losses_dict['cost_spring'] = [
@@ -103,7 +104,6 @@ class MRISPlaceSurface:
 
         do_curvature_loss = 'cost_curvature' in self.autograd_losses_dict.keys()
         do_vertex_repulsion_loss = 'cost_vertex_repulsion' in self.autograd_losses_dict.keys()
-        do_surface_repulsion_loss = 'cost_surface_repulsion' in self.autograd_losses_dict.keys()
         do_spring_loss = 'cost_spring' in self.autograd_losses_dict.keys()
 
         self.separate_loss_types = separate_loss_types
@@ -751,7 +751,7 @@ class MRISPlaceSurface:
             N_proj_smoothed = self.tmesh.smooth_over_neighbors(
                 N_proj, mask=valid, N_avgs=self.n_grad_avgs, n_hops=1, signed=True
             )
-            return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed
+            return weight * (0.5 / n_valid) * cost, weight * N_proj #_smoothed
 
         else:
             return weight * (0.5 / n_valid) * cost
@@ -775,15 +775,23 @@ class MRISPlaceSurface:
         g = g @ (self.timage.transform_dict['vox2surf']['rotation'].T).to(g.dtype)
 
         sgn = torch.ones_like(delta_I)
+        """
         sgn[valid] = torch.where(
             (g * self.tmesh.vert_norms[valid]).sum(dim=-1, keepdim=True) > 0, -1., 1.
         )
-        
+        """
+        """
+        nbr = self.tmesh.vert_neighbors_1hop
+        ok = nbr >= 0
+        s = sgn.squeeze(-1)
+        nbr_mean = (s[nbr.clamp(min=0)] * ok).sum(dim=1) / ok.sum(dim=1)
+        print('sign disagrees with neighbors:', ((s * nbr_mean) < 0)[valid].float().mean().item())
+        """
         if self.separate_loss_types:
             # Project differences onto normal and smooth over neighbors
             N_proj = sgn * delta_I.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
             N_proj_smoothed = self.tmesh.smooth_over_neighbors(
-                N_proj, mask=valid, N_avgs=self.n_grad_avgs, n_hops=1, signed=True
+                N_proj, mask=valid, N_avgs=5, n_hops=1, signed=True
             )
 
             # Compute loss/gradient
@@ -793,7 +801,7 @@ class MRISPlaceSurface:
                 0.5 * (delta_I.abs() ** 2),
                 max_delta * (delta_I.abs() - 0.5 * max_delta)
             ).sum()
-            return weight * (1. / n_valid) * cost, weight * N_proj_smoothed / n_valid
+            return weight * (1. / n_valid) * cost, weight * N_proj#_smoothed / n_valid
 
         else:
             # Compute loss
@@ -843,12 +851,20 @@ class MRISPlaceSurface:
         valid = (sgn * dot <= thresh) & valid_verts
         num = valid.sum(dim=1)
         dot = dot.clamp(min=-max_ratio, max=max_ratio)
-        
-        # Repulsion energy (weight * (1 - (dot.clamp(-val, val)) ** 4)) 
+
+        # Repulsion energy
         repulsion = (1. / 5.) * valid * ((1. - dot) ** 5)
         n_valid = (~self.rip_verts_flag).sum()
 
-        return weight * (1. / n_valid) * repulsion.sum()
+        # Gradient
+        scale = valid * ((1. - dot) ** 4)
+        scale[~self.rip_verts_flag] = 0
+        grad = -1 * scale.sum(dim=1, keepdim=True) * self.tmesh.vert_norms.detach()
+        grad_smoothed = self.tmesh.smooth_over_neighbors(
+            grad, mask=self.rip_verts_flag, N_avgs=5, n_hops=1, signed=True
+        )
+
+        return weight * (1. / n_valid) * repulsion.sum(), weight * (1. / n_valid) * grad_smoothed
             
     def cost_vertex_repulsion(self, weight=1.):
         """
@@ -902,7 +918,7 @@ class MRISPlaceSurface:
 
         return (0.5 / n_valid) * ((weight[0] * spring_N) + (weight[1] * spring_T)).sum()
     
-    # OPTIMIZERS -----------------------------------------------------------------------------------
+    # Diagnostics ----------------------------------------------------------------------------------
     def gradient_report(self):
         """
         Per-term gradient magnitudes at the current vertex positions
@@ -932,6 +948,33 @@ class MRISPlaceSurface:
             print(f'{func:>25} {gn.median():9.2e} {gn.quantile(0.95):9.2e} {gn.max():9.2e} '
                   f'{share:6.2f} {cos:6.2f}')
 
+    def inspect_vertex(self, vno):
+        X = self.tmesh.verts
+        with torch.no_grad():
+            self.tmesh._update_vert_properties(X)
+
+        print(f'vno {vno}  ripped: {self.tmesh.rip_verts_flag[vno].item()}')
+        for func, weight in self.autograd_losses_dict.items():
+            X.grad = None
+            eval(f'self.{func}(weight)').backward()
+            print(f'  {func:>25}: |grad| {X.grad[vno].norm().item():.2e}')
+        for func, weight in self.manual_grad_losses_dict.items():
+            _, grad = eval(f'self.{func}(weight)')
+            print(f'  {func:>25}: |grad| {grad[vno].norm().item():.2e}')
+            X.grad = None
+
+        # Local geometry: edge lengths to 1-hop neighbors, closest non-neighbor vertex
+        nbrs = self.tmesh.vert_neighbors_1hop[vno]
+        nbrs = nbrs[(nbrs >= 0) & (nbrs != vno)]
+        print(f'  edge lengths: {(X[nbrs] - X[vno]).norm(dim=-1).detach().cpu().numpy().round(3)}')
+
+        others = torch.ones(self.tmesh.nverts, dtype=torch.bool, device=X.device)
+        others[nbrs] = False
+        others[vno] = False
+        dist = (X - X[vno]).norm(dim=-1).masked_fill(~others, float('inf'))
+        print(f'  closest non-neighbor: vno {dist.argmin().item()} at {dist.min().item():.3f} mm')
+
+    # OPTIMIZERS -----------------------------------------------------------------------------------
     def lbfgs_optimize(
             self,
             history_size=10,
@@ -956,7 +999,7 @@ class MRISPlaceSurface:
             X.grad = None
             self.tmesh._update_vert_properties(X)
             L_total = X.new_zeros(())
-
+            
             # Gradient contributions w/ autograd
             for func, weight in self.autograd_losses_dict.items():
                 loss = eval(f'self.{func}(weight)')
@@ -1001,8 +1044,6 @@ class MRISPlaceSurface:
                 X.copy_(X_eval)
             X.grad = None
             f = closure()
-            #return f.detach(), X.grad.detach().clone()
-            f = closure()
             g = X.grad.detach().clone()
             #self.gradient_report()
             return f.detach(), g
@@ -1014,15 +1055,23 @@ class MRISPlaceSurface:
 
         #max_steps *= max_iters
 
+
+        #self.inspect_vertex(68007)
+        #self.inspect_vertex(109406)
+        #self.inspect_vertex(109385)
+        #breakpoint()
+
+        
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
+            """
             if self.verbose:
                 if self.log is not None:
                     with open(self.log, 'a') as log:
                         log.write(f'Iteration {i + 1}:')
                 else:
                     print(f'Iteration {i + 1}:')
-                    
+            """     
             q = g.clone()
             alphas = []
 
@@ -1047,6 +1096,10 @@ class MRISPlaceSurface:
             X0 = X.detach().clone()
             dmax = d.norm(dim=-1).max().clamp(min=1e-12).item()
 
+            #dn = d.norm(dim=-1)
+            #v = dn.argmax().item()
+            #print(f'  fastest vno {v}: |d| {dn[v].item():.2e}, median |d| {dn.median().item():.2e}')
+            
             #max_disp = float('inf')
             #t_max = max_disp / dmax            
             #t = min(1., 1. / g.abs().sum().item()) if not S else 1.
@@ -1112,10 +1165,11 @@ class MRISPlaceSurface:
                     S.pop(0); Y.pop(0); rho.pop(0)
             f, g = ft, gt
 
+            if sy <= 1e-10:
+                print('  history update skipped')
+
         # Finish and exit
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
-
-
         
     def lbfgs_optimize_torch(self, lr=1., history_size=10, max_iters=10, max_steps=50):
         """
