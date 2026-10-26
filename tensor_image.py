@@ -99,7 +99,7 @@ class TensorImage:
             _unsqueeze(self.data, dim=0, N=n).double(),
             grid, mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N).to(self.dtype)
-
+        
         return values
 
     def _interp_derivative(self, coords, dirs, sigma=None, mode='bilinear', flip_sign=False, geom='surf2vox'):
@@ -165,7 +165,7 @@ class TensorImage:
         def sample(g):
             g = (((2 * g / (self.shape - 1)) - 1)).view(1, 1, 1, -1, self.ndims).flip(dims=(-1,))
             values = torch.nn.functional.grid_sample(
-                _unsqueeze(self.data, dim=0, N=2).double(),
+                _unsqueeze(img, dim=0, N=2).double(),
                 g, mode='bilinear', padding_mode='border', align_corners=True
             )
             return values.reshape(self.ndims, *self.data.shape).float()
@@ -263,7 +263,7 @@ class GGVF(TensorImage):
             utils.fatal('Error in GGVF: only implemented for ndims == 3')
 
         # GGVF
-        grad = self.gradient_image(self.smooth()).movedim(-1, 0).float()
+        grad = self.gradient_image(img=self.smooth()).movedim(-1, 0).float()
         mag = grad.norm(dim=0, keepdim=True)
         g = torch.exp(-1. * mag / self.K)
         h = 1.0 - g
