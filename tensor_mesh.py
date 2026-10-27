@@ -254,8 +254,10 @@ class TensorMesh:
         """
         Update the mesh vertices and associated properties
         """
-        self.verts.data = X.data if X is not None else self.verts
-        self.mesh.vertices = X.data.detach().cpu() if X is not None else self.verts.detach().cpu()
+        if X is not None:
+            self.verts.data.copy_(X.data)
+
+        self.mesh.vertices = self.verts.detach().cpu()
         
         self._compute_vert_norms()
         self._compute_vert_tangents()
@@ -436,7 +438,7 @@ class TensorMesh:
         Laplacian smoothing of mesh. If idxs is not None, only do smoothing with those vertices.
         """
         with torch.no_grad():
-            X = self.verts if X is None else X).detach().clone()
+            X = (self.verts if X is None else X).detach().clone()
 
             # Get mask of valid vertices
             mask = torch.zeros(self.nverts, dtype=torch.bool, device=self.device)

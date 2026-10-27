@@ -671,7 +671,7 @@ class MRISPlaceSurface:
             if bad_verts.any():
                 if X0 is None:
                     # Laplacian smoothing
-                    X = self.tmesh.smooth_verts(idxs=torch.where(bad_verts)[0])
+                    X = self.tmesh.smooth_verts(X=X, n_iters=100, idxs=torch.where(bad_verts)[0])
                 else:
                     # Just replace them
                     X[bad_verts] = X0[bad_verts]
@@ -1110,7 +1110,7 @@ class MRISPlaceSurface:
 
                 for _ in range(max_iters):
                     Xt = X0 + t * d
-                    Xt = self.remove_intersections(Xt)
+                    #Xt = self.remove_intersections(Xt)
 
                     ft, gt = eval_fg(Xt)
                     gtd = (gt * d).sum()
@@ -1125,8 +1125,6 @@ class MRISPlaceSurface:
                         t0, f0, g0 = t, ft, gt
                         if t1 == float('inf') and t >= t_max:
                             break
-
-
                     t = 0.5 * (t0 + t1) if t1 < float('inf') else min(2. * t, t_max)
 
                 else:
@@ -1136,14 +1134,14 @@ class MRISPlaceSurface:
 
                     t, ft, gt = t0, f0, g0
                     Xt = X0 + t * d
-                    Xt = self.remove_intersections(Xt)
+                    #Xt = self.remove_intersections(Xt)
                     eval_fg(Xt)
 
 
             else:
                 for _ in range(max_iters):
                     Xt = X0 + t * d
-                    Xt = self.remove_intersections(Xt, X0)
+                    #Xt = self.remove_intersections(Xt, X0)
                     ft, gt = eval_fg(Xt)
                     if ft <= f + c1 * t * gd:
                         break
@@ -1152,8 +1150,14 @@ class MRISPlaceSurface:
                 else:
                     eval_fg(X0)
                     break
+
+            # Remove intersections
+            Xt_fix = self.remove_intersections(Xt.clone())
+            if not torch.equal(Xt_fixed, Xt):
+                Xt = Xt_fixed
+                ft, gt = eval_fg(Xt)
             
-            # Update history
+            # Update history            
             s, y = Xt - X0, gt - g
             sy = (s * y).sum()
             if sy > 1e-10:
