@@ -676,7 +676,7 @@ class MRISPlaceSurface:
                     # Just replace them
                     X[bad_verts] = X0[bad_verts]
 
-        return X, bad_verts if return_idxs else X
+        return (X, bad_verts) if return_idxs else X
         
         
     # COST FUNCTIONS -------------------------------------------------------------------------------
@@ -1074,14 +1074,17 @@ class MRISPlaceSurface:
             for (s, y, r), a in zip(zip(S, Y, rho), reversed(alphas)):
                 q += s * (a - r * (y * q).sum())
             d = -q
-
-            # Check if valid search direction
+            
             if frozen is not None:
                 d[frozen] = 0
-
+            
+            # Check if valid search direction
             gd = (g * d).sum()
             if gd >= 0:
-                d, gd = -g, -(g * g).sum()
+                d = -g
+                if frozen is not None:
+                    d[frozen] = 0
+                gd = (g * d).sum()
                 S, Y, rho = [], [], []
             
             # Line search
