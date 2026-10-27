@@ -658,7 +658,7 @@ class MRISPlaceSurface:
         self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
         self.max_intersurface_nproximity = self.intersurface_proximity_tree.shape[1]
 
-    def remove_intersections(self, X, X0=None):
+    def remove_intersections(self, X, X0=None, return_idxs=False):
         """
         Detect any self-intersections in the mesh using the Moller-Trumbore ray-triangle 
         intersection algorithm. If X_revert is not None, marked vertices will be reset from their 
@@ -676,7 +676,7 @@ class MRISPlaceSurface:
                     # Just replace them
                     X[bad_verts] = X0[bad_verts]
 
-        return X
+        return X, bad_verts if return_idxs else X
         
         
     # COST FUNCTIONS -------------------------------------------------------------------------------
@@ -1049,15 +1049,7 @@ class MRISPlaceSurface:
         X = self.tmesh.verts
         f, g = eval_fg(X.detach().clone())
         S, Y, rho = [], [], []
-
-        #max_steps *= max_iters
-
-
-        #self.inspect_vertex(68007)
-        #self.inspect_vertex(109406)
-        #self.inspect_vertex(109385)
-        #breakpoint()
-
+        frozen = None
         
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
@@ -1084,6 +1076,9 @@ class MRISPlaceSurface:
             d = -q
 
             # Check if valid search direction
+            if frozen is not None:
+                d[frozen] = 0
+
             gd = (g * d).sum()
             if gd >= 0:
                 d, gd = -g, -(g * g).sum()
@@ -1152,9 +1147,12 @@ class MRISPlaceSurface:
                     break
 
             # Remove intersections
-            Xt_fix = self.remove_intersections(Xt.clone())
-            if not torch.equal(Xt_fixed, Xt):
-                Xt = Xt_fixed
+            Xt_fix, idxs = self.remove_intersections(Xt.clone(), return_idxs=True)
+            frozen = None
+
+            if not torch.equal(Xt_fix, Xt):
+                Xt = Xt_fix
+                frozen = idxs
                 ft, gt = eval_fg(Xt)
             
             # Update history            
