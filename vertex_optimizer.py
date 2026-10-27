@@ -671,11 +671,11 @@ class MRISPlaceSurface:
             if bad_verts.any():
                 if X0 is None:
                     # Laplacian smoothing
-                    self.tmesh.smooth_verts(idxs=torch.where(bad_verts)[0])
+                    X = self.tmesh.smooth_verts(idxs=torch.where(bad_verts)[0])
                 else:
                     # Just replace them
                     X[bad_verts] = X0[bad_verts]
-                                    
+
         return X
         
         
@@ -1110,7 +1110,6 @@ class MRISPlaceSurface:
 
                 for _ in range(max_iters):
                     Xt = X0 + t * d
-                    #print(d.norm(dim=-1).max().item(), t)
                     Xt = self.remove_intersections(Xt)
 
                     ft, gt = eval_fg(Xt)
@@ -1144,11 +1143,12 @@ class MRISPlaceSurface:
             else:
                 for _ in range(max_iters):
                     Xt = X0 + t * d
-                    #Xt = self.remove_intersections(Xt, X0)
+                    Xt = self.remove_intersections(Xt, X0)
                     ft, gt = eval_fg(Xt)
                     if ft <= f + c1 * t * gd:
                         break
                     t *= 0.5
+
                 else:
                     eval_fg(X0)
                     break

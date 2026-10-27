@@ -431,11 +431,13 @@ class TensorMesh:
             vec[is_outlier] = vec[mask].mean()
         return vec
 
-    def smooth_verts(self, n_iters=1, idxs=None, exclude_ripped=True):
+    def smooth_verts(self, X=None, n_iters=1, idxs=None, exclude_ripped=True):
         """
         Laplacian smoothing of mesh. If idxs is not None, only do smoothing with those vertices.
         """
-        with torch.no_grad():        
+        with torch.no_grad():
+            X = self.verts if X is None else X).detach().clone()
+
             # Get mask of valid vertices
             mask = torch.zeros(self.nverts, dtype=torch.bool, device=self.device)
             mask[idxs if idxs is not None else slice(None)] = True
@@ -445,7 +447,6 @@ class TensorMesh:
             mask = mask.unsqueeze(dim=-1)
 
             # Iterative Laplacian smoothing
-            X = self.verts.detach().clone()
             nbrs = self.vert_neighbors_1hop
             valid = (
                 (nbrs > -1) & (nbrs != torch.arange(self.nverts).to(self.device).unsqueeze(dim=-1))
@@ -455,4 +456,4 @@ class TensorMesh:
             for _ in range(n_iters):
                 X = torch.where(mask, (X[nbrs] * valid).sum(dim=1) / N, X)
 
-        self._update_vert_properties(X)
+        return X
