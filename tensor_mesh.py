@@ -151,8 +151,8 @@ class TensorMesh:
         i, j = pairs[:, 0], pairs[:, 1]
 
         # Remove 1-hop neighbors
-        nbrs = self.vert_neighbors_1hop
-        rows = torch.arange(self.nverts).unsqueeze(1).expand_as(self.vert_neighbors_1hop)
+        nbrs = self.vert_neighbors_2hop
+        rows = torch.arange(self.nverts).unsqueeze(1).expand_as(self.vert_neighbors_2hop)
         valid = ~torch.isin(i * self.nverts + j, rows[nbrs > -1] * self.nverts + nbrs[nbrs > -1])
         i, j = i[valid], j[valid]
 
@@ -319,7 +319,7 @@ class TensorMesh:
         C = V[self.tris].mean(dim=1)
 
         pairs = torch.from_numpy(
-            cKDTree(C.cpu().numpy()).query_pairs(2 * dist.max().item(), output_type='ndarray')
+            cKDTree(C.cpu().numpy()).query_pairs(6., output_type='ndarray')
         ).long().to(self.device)
         tidxs_A, tidxs_B = pairs[:, 0], pairs[:, 1]
 
@@ -430,3 +430,29 @@ class TensorMesh:
         if remove_outliers:
             vec[is_outlier] = vec[mask].mean()
         return vec
+
+    def smooth_verts(self, n_iters=1, idxs=None, exclude_ripped=True):
+        """
+        Laplacian smoothing of mesh. If idxs is not None, only do smoothing with those vertices.
+        """
+        with torch.no_grad():        
+            # Get mask of valid vertices
+            mask = torch.zeros(self.nverts, dtype=torch.bool, device=self.device)
+            mask[idxs if idxs is not None else slice(None)] = True
+
+            if exclude_ripped and self.rip_verts_flag is not None:
+                mask &= ~self.rip_verts_flag
+            mask = mask.unsqueeze(dim=-1)
+
+            # Iterative Laplacian smoothing
+            X = self.verts.detach().clone()
+            nbrs = self.vert_neighbors_1hop
+            valid = (
+                (nbrs > -1) & (nbrs != torch.arange(self.nverts).to(self.device).unsqueeze(dim=-1))
+            ).unsqueeze(dim=-1)
+            N = valid.sum(dim=1).clamp(min=1)
+        
+            for _ in range(n_iters):
+                X = torch.where(mask, (X[nbrs] * valid).sum(dim=1) / N, X)
+
+        self._update_vert_properties(X)
