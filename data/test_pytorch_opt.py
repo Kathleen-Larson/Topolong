@@ -55,13 +55,12 @@ mesh_repulse = mesh_moving.copy()
 
 lut_fname = 'data/ASegStatsLUT.txt'
 lut = sf.load_label_lookup(lut_fname)
-breakpoint()
+
 # Run optimizer
 opt = MRISPlaceSurface(
     in_pial=mesh_moving,
     image=image,
     seg=aseg,
-    wm=wm,
     mesh_repulse=mesh_repulse,
     lut=lut,
     surf='pial',

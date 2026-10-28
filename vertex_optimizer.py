@@ -746,7 +746,7 @@ class MRISPlaceSurface:
                 0.5 * (delta_I.abs() ** 2),
                 max_delta * (delta_I.abs() - 0.5 * max_delta)
             ).sum()
-            return weight * (1. / n_valid) * cost, weight * N_proj #_smoothed / n_valid
+            return weight * (1. / n_valid) * cost, weight * N_proj / n_valid
 
         else:
             # Compute loss
@@ -803,7 +803,7 @@ class MRISPlaceSurface:
 
         # Gradient
         scale = valid * ((1. - dot) ** 4)
-        scale[~self.rip_verts_flag] = 0
+        scale[self.rip_verts_flag] = 0
         grad = -1 * scale.sum(dim=1, keepdim=True) * self.tmesh.vert_norms.detach()
         grad_smoothed = self.tmesh.smooth_over_neighbors(
             grad, mask=self.rip_verts_flag, N_avgs=5, n_hops=1, signed=True
