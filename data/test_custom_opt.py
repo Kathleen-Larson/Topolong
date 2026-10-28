@@ -18,8 +18,7 @@ Right now this is attempting to replicate lh.orig-->lh.white.preaparc (mris_plac
 device=torch.device('cuda')
 
 # Optimizer input params
-n_iters = 10
-lr = 1.0
+n_iters = 200
 
 L_crv = 1.0
 L_int = 0.2
@@ -73,7 +72,6 @@ opt = MRISPlaceSurface(
     l_surf_repulse=L_srp,    
     borders_dict=borders_dict,
     use_ggvf=True,
-    #targets_fname='data/synth.fsm010/mris_place_surface_target_intensities.lh.pial.txt',
     vert_prox_ratio=v_prox,
     surf_prox_ratio=s_prox,
     separate_loss_types=True,
@@ -84,8 +82,7 @@ opt = MRISPlaceSurface(
 print('Initialization complete')
 t = time.time()
 
-#opt.lbfgs_optimize(max_steps=n_iters, max_iters=10, line_search_fn='strong_wolfe')
-opt.lbfgs_optimize_torch(lr=lr, max_steps=n_iters)
+opt.lbfgs_optimize(max_steps=n_iters, max_iters=10, line_search_fn='strong_wolfe')
 print(f'optimization time: {(time.time() - t):>.0f} s')
 
 mesh_opt = opt.mesh
