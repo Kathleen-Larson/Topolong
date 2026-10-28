@@ -704,7 +704,7 @@ class MRISPlaceSurface:
 
         return weight * (0.5 /  n_valid) * (eps[valid_centers] ** 2).sum()
 
-    def cost_intensity(self, weight=1., step_sz=0.1, max_delta=5.):
+    def cost_intensity(self, weight=1., step_sz=0.1, max_delta=20.):
         """
         Intensity constraint
         """
@@ -929,6 +929,7 @@ class MRISPlaceSurface:
             c1=1e-4,
             c2=0.9,
             max_disp=0.3,
+            fallback_disp=0.1,
     ):
         """
         Vertex placement with custom LBFGS optimizer
@@ -993,6 +994,12 @@ class MRISPlaceSurface:
             #self.gradient_report()
             return f.detach(), g
 
+        def clip_direction(d, clip_quantile=0.95):
+            # Cap each vertex's direction at a percentile so outliers don't set the step for everyone
+            dn = d.norm(dim=-1, keepdim=True)
+            d_cap = dn[~self.rip_verts_flag].quantile(clip_quantile).clamp(min=1e-12)
+            return d * (d_cap / dn.clamp(min=d_cap))
+
         # Initialize
         X = self.tmesh.verts
         f, g = eval_fg(X.detach().clone())
@@ -1025,6 +1032,7 @@ class MRISPlaceSurface:
             
             if frozen is not None:
                 d[frozen] = 0
+            d = clip_direction(d)
             
             # Check if valid search direction
             gd = (g * d).sum()
@@ -1032,6 +1040,7 @@ class MRISPlaceSurface:
                 d = -g
                 if frozen is not None:
                     d[frozen] = 0
+                d = clip_direction(d)
                 gd = (g * d).sum()
                 S, Y, rho = [], [], []
             
@@ -1039,6 +1048,9 @@ class MRISPlaceSurface:
             X0 = X.detach().clone()
             dmax = d.norm(dim=-1).max().clamp(min=1e-12).item()
 
+            dn = d.norm(dim=-1)[~self.rip_verts_flag]
+            print(f'  step {i}: |d| median {dn.median():.2e}, max {dn.max():.2e}')
+            
             t_max = max_disp / dmax
             t = min(1., t_max)
             
@@ -1065,15 +1077,38 @@ class MRISPlaceSurface:
                     t = 0.5 * (t0 + t1) if t1 < float('inf') else min(2. * t, t_max)
 
                 else:
+                    """
                     if t0 == 0:
                         eval_fg(X0)
                         break
-
                     t, ft, gt = t0, f0, g0
                     Xt = X0 + t * d
                     eval_fg(Xt)
+                    """
+                    if t0 == 0:
+                        # Line search failed: reset history and take a small capped step along -g
+                        S, Y, rho = [], [], []
+                        d = -g
+                        if frozen is not None:
+                            d[frozen] = 0
 
+                        dn = d.norm(dim=-1, keepdim=True)
+                        keep = ~self.rip_verts_flag
+                        t = fallback_disp / dn[keep].quantile(0.95).clamp(min=1e-12).item()
+                        step = t * d
+                        step = step * (fallback_disp / (t * dn).clamp(min=fallback_disp))
 
+                        # Store the actual step so anything using t * d downstream matches it
+                        d = step
+                        t = 1.
+                        Xt = X0 + t * d
+                        ft, gt = eval_fg(Xt)
+                        
+                    else:
+                        t, ft, gt = t0, f0, g0
+                        Xt = X0 + t * d
+                        eval_fg(Xt)
+                        
             else:
                 for _ in range(max_iters):
                     Xt = X0 + t * d
