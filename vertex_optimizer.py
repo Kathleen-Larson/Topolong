@@ -31,7 +31,6 @@ class MRISPlaceSurface:
             device=None,        # device to store all tensor-based classes/operations
             l_curvature=None,   # weighting for curvature loss
             l_intensity=None,   # weighting for intensity loss
-            l_location=None,    # weight for target location loss
             l_nspring=None,     # weighting for spring energy loss (normal component)
             l_tspring=None,     # weighting for spring energy loss (tangential component)
             l_vert_repulse=None,   # weighting for vertex repulsion energy loss
@@ -69,7 +68,6 @@ class MRISPlaceSurface:
         weights = [
             l_curvature,
             l_intensity,
-            l_location,
             l_nspring,
             l_tspring,
             l_vert_repulse,
@@ -82,13 +80,10 @@ class MRISPlaceSurface:
         self.manual_grad_losses_dict = {}
         if l_intensity is not None and l_intensity > 0:
             self.manual_grad_losses_dict['cost_intensity'] = l_intensity
-        if l_location is not None and l_location > 0:
-            self.manual_grad_losses_dict['cost_location'] = l_location
         if l_surf_repulse is not None and l_surf_repulse > 0:
             self.manual_grad_losses_dict['cost_surface_repulsion'] = l_surf_repulse
 
         do_intensity_loss = 'cost_intensity' in self.manual_grad_losses_dict.keys()
-        do_location_loss = 'cost_location' in self.manual_grad_losses_dict.keys()
         do_surface_repulsion_loss = 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys()
             
         self.autograd_losses_dict = {}
@@ -127,7 +122,7 @@ class MRISPlaceSurface:
             verts_requires_grad=True,
             proximity_ratio=vert_prox_ratio,
         )
-
+        
         # Target curvature?
         self.use_curvature_residuals = mesh_target is None
 
@@ -165,7 +160,7 @@ class MRISPlaceSurface:
         self._set_fixed_vertices(seg=tseg, lut=lut)
 
         # Determine target intensities for vertex placement
-        if do_intensity_loss or do_location_loss:
+        if do_intensity_loss:
             self.n_grad_avgs = n_grad_avgs
             self.smoothing_sigma = smoothing_sigma
 
@@ -709,50 +704,6 @@ class MRISPlaceSurface:
 
         return weight * (0.5 /  n_valid) * (eps[valid_centers] ** 2).sum()
 
-    def cost_location(self, weight=1., max_delta=5.):
-        """
-        Target location constraint
-        """
-        valid = self.has_valid_intensity & (~self.rip_verts_flag)
-        n_valid = valid.sum()
-
-        """
-        # Calculate distance vector to target point
-        disp_N = torch.zeros((self.tmesh.nverts, 1), dtype=self.it_norms.dtype).to(self.device)
-        disp_N[valid] = (
-            (self.target_pts[valid] - self.tmesh.verts[valid]) * self.it_norms[valid]
-        ).sum(dim=-1, keepdim=True)
-        
-        # Project distances onto normals and smooth over neighbors
-        N_proj = -1 * disp_N.clamp(min=-max_delta, max=max_delta) * self.it_norms
-        N_proj_smoothed = self.tmesh.smooth_over_neighbors(
-            N_proj, mask=valid, N_avgs=self.n_grad_avgs, n_hops=1, signed=True
-        )
-
-        # Compute loss
-        cost = (disp_N ** 2).sum()
-        return weight * (0.5 / n_valid) * cost, weight * N_proj_smoothed
-        """
-        
-        # Calculate distance vector to target point
-        disp = torch.zeros_like(self.tmesh.vert_norms)
-        disp[valid] = self.target_pts[valid] - self.tmesh.verts[valid]
-        disp_N = (disp * self.tmesh.vert_norms).sum(dim=-1, keepdim=True)
-        
-        # Compute loss
-        cost = (disp_N ** 2).sum()
-        
-        if self.separate_loss_types:
-            # Project distances onto normals and smooth over neighbors
-            N_proj = -1 * disp_N.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
-            N_proj_smoothed = self.tmesh.smooth_over_neighbors(
-                N_proj, mask=valid, N_avgs=self.n_grad_avgs, n_hops=1, signed=True
-            )
-            return weight * (0.5 / n_valid) * cost, weight * N_proj #_smoothed
-
-        else:
-            return weight * (0.5 / n_valid) * cost
-        
     def cost_intensity(self, weight=1., step_sz=0.1, max_delta=5.):
         """
         Intensity constraint
@@ -787,9 +738,6 @@ class MRISPlaceSurface:
         if self.separate_loss_types:
             # Project differences onto normal and smooth over neighbors
             N_proj = sgn * delta_I.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
-            N_proj_smoothed = self.tmesh.smooth_over_neighbors(
-                N_proj, mask=valid, N_avgs=5, n_hops=1, signed=True
-            )
 
             # Compute loss/gradient
             #cost = (delta_I ** 2).sum()
@@ -798,7 +746,7 @@ class MRISPlaceSurface:
                 0.5 * (delta_I.abs() ** 2),
                 max_delta * (delta_I.abs() - 0.5 * max_delta)
             ).sum()
-            return weight * (1. / n_valid) * cost, weight * N_proj#_smoothed / n_valid
+            return weight * (1. / n_valid) * cost, weight * N_proj #_smoothed / n_valid
 
         else:
             # Compute loss
@@ -1091,14 +1039,6 @@ class MRISPlaceSurface:
             X0 = X.detach().clone()
             dmax = d.norm(dim=-1).max().clamp(min=1e-12).item()
 
-            #dn = d.norm(dim=-1)
-            #v = dn.argmax().item()
-            #print(f'  fastest vno {v}: |d| {dn[v].item():.2e}, median |d| {dn.median().item():.2e}')
-            
-            #max_disp = float('inf')
-            #t_max = max_disp / dmax            
-            #t = min(1., 1. / g.abs().sum().item()) if not S else 1.
-
             t_max = max_disp / dmax
             t = min(1., t_max)
             
@@ -1108,7 +1048,6 @@ class MRISPlaceSurface:
 
                 for _ in range(max_iters):
                     Xt = X0 + t * d
-                    #Xt = self.remove_intersections(Xt)
 
                     ft, gt = eval_fg(Xt)
                     gtd = (gt * d).sum()
@@ -1132,7 +1071,6 @@ class MRISPlaceSurface:
 
                     t, ft, gt = t0, f0, g0
                     Xt = X0 + t * d
-                    #Xt = self.remove_intersections(Xt)
                     eval_fg(Xt)
 
 
@@ -1157,7 +1095,7 @@ class MRISPlaceSurface:
                 Xt = Xt_fix
                 frozen = idxs
                 ft, gt = eval_fg(Xt)
-            
+
             # Update history            
             s, y = Xt - X0, gt - g
             sy = (s * y).sum()
@@ -1268,28 +1206,21 @@ class MRISPlaceSurface:
                     print(f'Iteration {i + 1}:')
 
             # Closure function
+            X_prev = X.detach().clone()
             opt.step(closure)
-            #self.remove_intersections(X)
-            self.gradient_report()
-            
-            #print(f'{((X[vno] - v) * self.tmesh.vert_norms[vno]).sum():.3f}, {((X[vno] - v) ** 2).sum().sqrt():.3f}')
-            
-            # Refresh cached properties
-            """
-            if i < (max_steps - 1):
-                if 'cost_vertex_repulsion' in self.losses_dict:
-                    with torch.no_grad():
-                        self.tmesh._compute_proximity_tree()
-                
-                if 'cost_surface_repulsion' in self.losses_dict:
-                    with torch.no_grad():
-                        self._compute_intersurface_proximity_tree()
-            """
-            """    
-            if 'cost_intensity' in self.losses_dict:
-                with torch.no_grad():
-                    self._calculate_target_intensities(step_factor=1., it=(i+1))
-            """
+
+            # Intersection removal
+            with torch.no_grad():
+                X_fix = self.remove_intersections(X.clone())
+
+                if not torch.equal(X_fix, X):
+                    X.copy_(X_fix)
+
+                state = opt.state[X]
+                if state.get('d') is not None:
+                    state['d'] = (X - X_prev).flatten().clone()
+                    state['t'] = 1.
+            #breakpoint()
 
         # Update input surfa mesh
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
