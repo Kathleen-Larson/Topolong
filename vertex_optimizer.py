@@ -155,9 +155,10 @@ class MRISPlaceSurface:
         else:
             self.tmesh_repulsion = None
             
-        # Set fixed (aka ripped) vertices
+        # Initialize ripped verts and surface placement mask with aseg/lut
         tseg = TensorImage(seg, dtype='int', device=self.device)
-        self._set_fixed_vertices(seg=tseg, lut=lut)
+        self._set_fixed_vertices(tseg, lut)
+        #self._generate_surface_mask(tseg, lut)
 
         # Determine target intensities for vertex placement
         if do_intensity_loss:
@@ -173,6 +174,10 @@ class MRISPlaceSurface:
             self.image = image
             self.timage = TensorImage(image, do_smoothing=True, device=device)
             self.ggvf = GGVF(image, device=device)
+            
+            #self.timage.data = self.timage.data * (~self.surface_mask.data.to(torch.bool))
+            #sf.Volume(self.timage.data.cpu().numpy()).save('test.mgz')
+            #sf.Volume(self.surface_mask.data.cpu().numpy()).save('mask.mgz')
             
             """
             Right now this is hard coded from autodet.gw.stats.lh.dat, but will replace with 
@@ -216,7 +221,7 @@ class MRISPlaceSurface:
                     ).unsqueeze(dim=-1)
                     self.has_valid_intensity = (~self.rip_verts_flag)
         
-    def _set_fixed_vertices(self, seg, lut):
+    def _set_fixed_vertices(self, tseg, lut):
         """
         Determines vertices that should remain fixed in initial position during surface placement.
         Based off of MRISripMidline in utils/mrisurf.cpp. Essentially, samples aseg along surface 
@@ -242,7 +247,7 @@ class MRISPlaceSurface:
 
         pos = torch.arange(0, (n_pts * step) + step, step).repeat([nverts, 1]).to(self.device)
         pts = self.tmesh.compute_points_along_normals(N=n_pts, stepsize=step)
-        pt_labels = seg.interpolate(pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
+        pt_labels = tseg.interpolate(pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
         
         # Define separate search directions
         pt_labels_out = pt_labels[:, n_pts:]
@@ -304,7 +309,9 @@ class MRISPlaceSurface:
                 torch.tensor([0, 0, 1.], device=self.device)
                 * torch.arange(0, 10 + step, step, device=self.device).unsqueeze(dim=-1)
             )
-            z_pt_labels = seg.interpolate(z_pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
+            z_pt_labels = (
+                tseg.interpolate(z_pts.reshape(-1, 3), mode='nearest').reshape(nverts, -1)
+            )
             M = check_pt_labels(z_pt_labels, 'Putamen')
 
             self.rip_verts_flag |= (M[:, :3].any(dim=-1) & (M.float().mean(dim=-1) > 0.5))
@@ -336,6 +343,24 @@ class MRISPlaceSurface:
         # Store rip_verts_flag as tmesh attribute
         self.tmesh._freeze_verts(torch.where(self.rip_verts_flag)[0])
 
+    def _generate_surface_mask(self, tseg, lut):
+        """
+        Create a of the contralateral hemisphere and cerebellum. Used to prevent pial surface from 
+        bleeding into incorrect tissues.
+        """
+        contra_wm = '-'.join(['Right' if self.hemi == 'lh' else 'Left', 'Cerebral-White-Matter'])
+        contra_gm = '-'.join(['Right' if self.hemi == 'lh' else 'Left', 'Cerebral-Cortex'])
+        labels_exclude = torch.tensor(
+            utils.search_lut(lut, [contra_wm, contra_gm, 'Cerebellum'])
+        ).to(self.device)
+        
+        self.surface_mask = TensorImage(
+            torch.isin(tseg.data, labels_exclude),
+            ref_image=tseg,
+            dtype='int',
+            device=self.device
+        )
+
     def _calculate_target_intensities_ggvf(self, max_dist=10., step_factor=1., n_avg_iters=5):
         """
         Calculates target intensities for each vertex by sampling along GGVF profiles to find best 
@@ -346,6 +371,8 @@ class MRISPlaceSurface:
         nverts = self.tmesh.nverts
         eps = 1e-5
 
+        vno = 76133
+
         step_sz = 0.1 * step_factor * self.timage.voxsize[0]
         max_dist *= step_factor
         n_steps = int((max_dist / self.timage.voxsize.min()).ceil().item() / step_sz)
@@ -353,7 +380,7 @@ class MRISPlaceSurface:
         # Generate points along GGVF field lines
         n_pts = 2 * n_steps + 1
         pts = torch.zeros((nverts, n_pts, 3), device=self.device)
-        pts[:, n_steps, :] = self.tmesh.verts
+        pts[:, n_steps, :] = self.tmesh.verts.detach().clone()
 
         def build_ggvf_profile(sign=1):
             R = self.timage.transform_dict['vox2surf']['rotation']
@@ -441,7 +468,7 @@ class MRISPlaceSurface:
 
         self.target_pts = self.tmesh.verts.clone()
         self.target_pts[found] = pts[found, target_idxs[found]].double()
-        
+
         """
         target_mesh = self.mesh.copy()
         target_mesh.vertices = self.target_pts.detach().cpu()
@@ -465,11 +492,13 @@ class MRISPlaceSurface:
         nverts = self.tmesh.nverts
         eps = 1e-7
 
+        vno = 76133
+
         # Sampling points
         step_sz = 0.5 * self.timage.voxsize[0]
         upsample = (step_sz / 0.1).int().item()
         step_sz_up = step_sz / upsample
-        
+
         pts = self.tmesh.compute_points_along_normals(
             N=(max_dist / step_sz).ceil().int(), stepsize=step_sz
         ).to(self.device)
@@ -613,14 +642,15 @@ class MRISPlaceSurface:
         
         self.target_pts = self.tmesh.verts.clone()
         self.target_pts[found_idx] = pts_up[found_idx, target_idxs[found_idx]]
-
+        
         """
         target_mesh = self.mesh.copy()
         target_mesh.vertices = self.target_pts.detach().cpu()
         target_mesh.save(f'target_pts_{self.surf}_FS')
         print(f'target_pts_{self.surf}_FS')
+        breakpoint()
         """
-
+        
         self.target_pos = torch.zeros_like(self.target_intensities)
         self.target_pos[found_idx] = pos_up[target_idxs[found_idx]]
 
@@ -653,6 +683,17 @@ class MRISPlaceSurface:
         self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
         self.max_intersurface_nproximity = self.intersurface_proximity_tree.shape[1]
 
+    def mask_displacement(self, X, X0):
+        """
+        Flag any vertices that are in illegal areas (aka contralateral hemisphere or in cerebellum)
+        """
+        with torch.no_grad():
+            idxs = torch.where(
+                self.surface_mask.interpolate(X, mode='nearest').squeeze() & ~self.rip_verts_flag
+            )
+            X[idxs] = X0[idxs]
+        return X
+        
     def remove_intersections(self, X, X0=None, return_idxs=False):
         """
         Detect any self-intersections in the mesh using the Moller-Trumbore ray-triangle 
@@ -672,8 +713,8 @@ class MRISPlaceSurface:
                     X[bad_verts] = X0[bad_verts]
 
         return (X, bad_verts) if return_idxs else X
-        
-        
+
+    
     # COST FUNCTIONS -------------------------------------------------------------------------------
 
     def cost_curvature(self, weight=1.):
@@ -719,10 +760,10 @@ class MRISPlaceSurface:
         delta_I = (self.target_intensities - I)
 
         # Get sign
-        g = self.ggvf.interpolate(self.tmesh.verts[valid], geom='surf2vox').transpose(0, 1)
-        g = g @ (self.timage.transform_dict['vox2surf']['rotation'].T).to(g.dtype)
+        #g = self.ggvf.interpolate(self.tmesh.verts[valid], geom='surf2vox').transpose(0, 1)
+        #g = g @ (self.timage.transform_dict['vox2surf']['rotation'].T).to(g.dtype)
 
-        sgn = torch.ones_like(delta_I)
+        #sgn = torch.ones_like(delta_I)
         """
         sgn[valid] = torch.where(
             (g * self.tmesh.vert_norms[valid]).sum(dim=-1, keepdim=True) > 0, -1., 1.
@@ -737,7 +778,7 @@ class MRISPlaceSurface:
         """
         if self.separate_loss_types:
             # Project differences onto normal and smooth over neighbors
-            N_proj = sgn * delta_I.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
+            N_proj = delta_I.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
 
             # Compute loss/gradient
             #cost = (delta_I ** 2).sum()
@@ -746,6 +787,7 @@ class MRISPlaceSurface:
                 0.5 * (delta_I.abs() ** 2),
                 max_delta * (delta_I.abs() - 0.5 * max_delta)
             ).sum()
+
             return weight * (1. / n_valid) * cost, weight * N_proj / n_valid
 
         else:
@@ -991,11 +1033,10 @@ class MRISPlaceSurface:
             X.grad = None
             f = closure()
             g = X.grad.detach().clone()
-            #self.gradient_report()
             return f.detach(), g
 
+        # Cap each vertex's direction at a percentile so outliers don't set the step for everyone
         def clip_direction(d, clip_quantile=0.95):
-            # Cap each vertex's direction at a percentile so outliers don't set the step for everyone
             dn = d.norm(dim=-1, keepdim=True)
             d_cap = dn[~self.rip_verts_flag].quantile(clip_quantile).clamp(min=1e-12)
             return d * (d_cap / dn.clamp(min=d_cap))
@@ -1008,14 +1049,6 @@ class MRISPlaceSurface:
         
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
-            """
-            if self.verbose:
-                if self.log is not None:
-                    with open(self.log, 'a') as log:
-                        log.write(f'Iteration {i + 1}:')
-                else:
-                    print(f'Iteration {i + 1}:')
-            """     
             q = g.clone()
             alphas = []
 
@@ -1052,7 +1085,8 @@ class MRISPlaceSurface:
             print(f'  step {i}: |d| median {dn.median():.2e}, max {dn.max():.2e}')
             
             t_max = max_disp / dmax
-            t = min(1., t_max)
+            t = t_max
+            #t = min(1., t_max)
             
             if line_search_fn == 'strong_wolfe':
                 t0, f0, g0 = 0., f, g
@@ -1091,16 +1125,6 @@ class MRISPlaceSurface:
                         d = -g
                         if frozen is not None:
                             d[frozen] = 0
-
-                        dn = d.norm(dim=-1, keepdim=True)
-                        keep = ~self.rip_verts_flag
-                        t = fallback_disp / dn[keep].quantile(0.95).clamp(min=1e-12).item()
-                        step = t * d
-                        step = step * (fallback_disp / (t * dn).clamp(min=fallback_disp))
-
-                        # Store the actual step so anything using t * d downstream matches it
-                        d = step
-                        t = 1.
                         Xt = X0 + t * d
                         ft, gt = eval_fg(Xt)
                         
@@ -1112,7 +1136,6 @@ class MRISPlaceSurface:
             else:
                 for _ in range(max_iters):
                     Xt = X0 + t * d
-                    #Xt = self.remove_intersections(Xt, X0)
                     ft, gt = eval_fg(Xt)
                     if ft <= f + c1 * t * gd:
                         break
@@ -1122,8 +1145,9 @@ class MRISPlaceSurface:
                     eval_fg(X0)
                     break
 
-            # Remove intersections
+            # Check for bad vert movement (intersections or in wrong tissue)
             Xt_fix, idxs = self.remove_intersections(Xt.clone(), return_idxs=True)
+            #Xt_fix = self.mask_displacement(Xt_fix, X0)
             frozen = None
 
             if not torch.equal(Xt_fix, Xt):
@@ -1144,6 +1168,8 @@ class MRISPlaceSurface:
                 print('  history update skipped')
 
         # Finish and exit
+        self.remove_intersections(X)
+        self.tmesh._update_vert_properties(X)
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
         
     def lbfgs_optimize_torch(self, lr=1., history_size=10, max_iters=10, max_steps=50):

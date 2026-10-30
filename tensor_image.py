@@ -16,6 +16,7 @@ import utils
 class TensorImage:
     def __init__(self,
                  image,
+                 ref_image=None,
                  dtype='float',
                  device=None,
                  is_talairach=True,
@@ -28,35 +29,47 @@ class TensorImage:
         ) if not isinstance(device, torch.device) else device
         
         # Image data
-        self.image = image
-        self.data = torch.tensor(
-            image.data.astype(np.int32 if dtype=='int' else np.float32),
-            dtype=(torch.int if dtype=='int' else torch.float)
-        ).to(self.device)
+        if isinstance(image, sf.Volume):
+            self.image = image
+            self.data = torch.tensor(
+                image.data.astype(np.int32 if dtype=='int' else np.float32),
+                dtype=(torch.int if dtype=='int' else torch.float)
+            ).to(self.device)
 
+            ref_image = image
+
+        elif torch.is_tensor(image):
+            self.data = image.to(torch.int if dtype=='int' else torch.float)
+            if ref_image is None:
+                utils.fatal('Error in TensorImage: ref_image required if input is tensor')
+
+            ref_image = ref_image.image if isinstance(ref_image, TensorImage) else ref_image
+            self.image = ref_image
+            self.image.data = image.cpu().numpy()
+                
         self.ndims = 3
         self.dtype = self.data.dtype
         
         # Spatial info
-        self.voxsize = torch.tensor(image.geom.voxsize).to(self.device)
-        self.shape = torch.tensor(image.geom.shape, dtype=self.voxsize.dtype).to(self.device)
+        self.voxsize = torch.tensor(ref_image.geom.voxsize).to(self.device)
+        self.shape = torch.tensor(ref_image.geom.shape, dtype=self.voxsize.dtype).to(self.device)
 
         self.transform_dict = {}
         self.transform_dict['vox2world'] = {
-            'start': torch.tensor(image.geom.vox2world[:3, -1]).to(self.device),
-            'rotation': torch.tensor(image.geom.vox2world[:3, :3]).to(self.device)
+            'start': torch.tensor(ref_image.geom.vox2world[:3, -1]).to(self.device),
+            'rotation': torch.tensor(ref_image.geom.vox2world[:3, :3]).to(self.device)
         }
         self.transform_dict['world2vox'] = {
-            'start': torch.tensor(image.geom.vox2world[:3, -1]).to(self.device),
-            'rotation': torch.tensor(image.geom.world2vox[:3, :3]).to(self.device)
+            'start': torch.tensor(ref_image.geom.vox2world[:3, -1]).to(self.device),
+            'rotation': torch.tensor(ref_image.geom.world2vox[:3, :3]).to(self.device)
         }
         self.transform_dict['vox2surf'] = {
-            'start': torch.tensor(image.geom.vox2surf[:3, -1]).to(self.device),
-            'rotation': torch.tensor(image.geom.vox2surf[:3, :3]).to(self.device)
+            'start': torch.tensor(ref_image.geom.vox2surf[:3, -1]).to(self.device),
+            'rotation': torch.tensor(ref_image.geom.vox2surf[:3, :3]).to(self.device)
         }
         self.transform_dict['surf2vox'] = {
-            'start': torch.tensor(image.geom.vox2surf[:3, -1]).to(self.device),
-            'rotation': torch.tensor(image.geom.surf2vox[:3, :3]).to(self.device)
+            'start': torch.tensor(ref_image.geom.vox2surf[:3, -1]).to(self.device),
+            'rotation': torch.tensor(ref_image.geom.surf2vox[:3, :3]).to(self.device)
         }
 
         for geom, dct in self.transform_dict.items():

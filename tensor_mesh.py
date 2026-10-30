@@ -281,7 +281,7 @@ class TensorMesh:
             [arr - (stepsize / 2), (arr[-1] + (stepsize / 2)).unsqueeze(dim=0)]
         ) if offset else arr
 
-        vert_norm_points = self.verts.unsqueeze(-1) + (
+        vert_norm_points = self.verts.unsqueeze(-1).detach() + (
             self.vert_norms.detach().unsqueeze(-1) * arr.unsqueeze(0)
         )
         return vert_norm_points.transpose(1, 2)
