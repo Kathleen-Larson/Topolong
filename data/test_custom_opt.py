@@ -94,7 +94,7 @@ print(f'max displacement: {disp.max():.3f} mm')
 
 # Save results
 output_fname = (
-    f'data/lh.pial.n_iters_{n_iters}.lr_{lr:.0e}.' +
+    f'data/lh.pial.n_iters_{n_iters}.' +
     f'int_{L_int:.0e}.curv_{L_crv:.0e}.spring_{L_spr:.0e}.vrep_{L_vrp:.0e}.srep_{L_srp:.0e}.' +
     f'vert_prox_ratio_{v_prox:.0e}.surf_prox_ratio_{s_prox:.0e}'
 )
