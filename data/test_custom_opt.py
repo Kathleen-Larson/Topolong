@@ -18,7 +18,7 @@ Right now this is attempting to replicate lh.orig-->lh.white.preaparc (mris_plac
 device=torch.device('cuda')
 
 # Optimizer input params
-n_iters = 10
+n_iters = 50
 
 L_crv = 1.0
 L_int = 0.2
