@@ -18,7 +18,7 @@ Right now this is attempting to replicate lh.orig-->lh.white.preaparc (mris_plac
 device=torch.device('cuda')
 
 # Optimizer input params
-n_iters = 200
+n_iters = 10
 
 L_crv = 1.0
 L_int = 0.2
@@ -96,7 +96,7 @@ print(f'max displacement: {disp.max():.3f} mm')
 output_fname = (
     f'data/lh.pial.n_iters_{n_iters}.lr_{lr:.0e}.' +
     f'int_{L_int:.0e}.curv_{L_crv:.0e}.spring_{L_spr:.0e}.vrep_{L_vrp:.0e}.srep_{L_srp:.0e}.' +
-    f'vert_prox_ratio_{v_prox:.0e}.surf_prox_ratio_{s_prox:.0e}.old_opt_test'
+    f'vert_prox_ratio_{v_prox:.0e}.surf_prox_ratio_{s_prox:.0e}'
 )
 
 mesh_opt.save(output_fname)
