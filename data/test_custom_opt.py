@@ -60,7 +60,6 @@ opt = MRISPlaceSurface(
     insurf=mesh_moving_fname,
     image=image_fname,
     seg=aseg_fname,
-    mesh_repulse=mesh_repulse,
     lut=lut,
     surf='pial',
     l_curvature=L_crv,
