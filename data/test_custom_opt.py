@@ -57,9 +57,9 @@ lut = sf.load_label_lookup(lut_fname)
 
 # Run optimizer
 opt = MRISPlaceSurface(
-    in_pial=mesh_moving,
-    image=image,
-    seg=aseg,
+    insurf=mesh_moving_fname,
+    image=image_fname,
+    seg=aseg_fname,
     mesh_repulse=mesh_repulse,
     lut=lut,
     surf='pial',
@@ -73,8 +73,6 @@ opt = MRISPlaceSurface(
     use_ggvf=False,
     vert_prox_ratio=v_prox,
     surf_prox_ratio=s_prox,
-    separate_loss_types=True,
-    adaptive=False,
     verbose=True
 )
 

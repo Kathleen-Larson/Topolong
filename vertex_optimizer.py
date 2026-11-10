@@ -36,7 +36,6 @@ class MRISPlaceSurface:
             n_grad_avgs=1,      # no. averages to start for loss smoothing (intensity only)
             vert_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
             surf_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
-            separate_loss_types=True,
             smoothing_sigma=2.,  #
             use_ggvf=False,
             targets_fname=None,  # name of file containing target intensities (probs debug only)
@@ -119,7 +118,7 @@ class MRISPlaceSurface:
 
         # Repulsive force?
         if 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys():
-            mesh_repulse = self.mesh.copy()
+            mesh_repulse = self.mesh.copy() if mesh_repulse is None else sf.load_mesh(mesh_repulse)
             self.repulsion_kdtree = cKDTree(mesh_repulse.vertices)
 
             self.tmesh_repulsion = TensorMesh(
@@ -181,7 +180,10 @@ class MRISPlaceSurface:
                     T1=self.timage.data, seg=tseg.data, wm=None, lut=lut
                 ).compute_border_stats(gm_lo=30, gm_hi=110, use_modes=True, which='white')
                 """
-                self._calculate_target_intensities_ggvf(n_avg_iters=5)
+                if use_ggvf:
+                    self._calculate_target_intensities_ggvf(n_avg_iters=5)
+                else:
+                    self._calculate_target_intensities_FS(n_avg_iters=5)
 
     def _set_fixed_vertices(self, tseg, lut):
         """
