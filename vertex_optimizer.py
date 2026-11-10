@@ -118,7 +118,7 @@ class MRISPlaceSurface:
 
         # Repulsive force?
         if 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys():
-            mesh_repulse = self.mesh.copy() if mesh_repulse is None else sf.load_mesh(mesh_repulse)
+            mesh_repulse = self.mesh.copy() if mesh_repulse is not None else sf.load_mesh(mesh_repulse)
             self.repulsion_kdtree = cKDTree(mesh_repulse.vertices)
 
             self.tmesh_repulsion = TensorMesh(
@@ -148,7 +148,6 @@ class MRISPlaceSurface:
                             'loss')
             image = sf.load_volume(image)
             self.timage = TensorImage(image, do_smoothing=True, device=device)
-            self.ggvf = GGVF(image, device=device)
             
             """
             Right now this is hard coded from autodet.gw.stats.lh.dat, but will replace with 
@@ -181,6 +180,7 @@ class MRISPlaceSurface:
                 ).compute_border_stats(gm_lo=30, gm_hi=110, use_modes=True, which='white')
                 """
                 if use_ggvf:
+                    self.ggvf = GGVF(image, device=device)
                     self._calculate_target_intensities_ggvf(n_avg_iters=5)
                 else:
                     self._calculate_target_intensities_FS(n_avg_iters=5)
