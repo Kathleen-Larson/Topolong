@@ -19,15 +19,13 @@ from border_stats import BorderStatsGenerator
 class MRISPlaceSurface:
     def __init__(
             self,
-            in_pial=None,       # input pial surface to optimiate (surfa mesh)
-            in_white=None,      # input white surface to optimate (surfa mesh)
-            image=None,         # surfa volume to use for intensity optimization
-            mesh_target=None,   # surfa mesh to use as target for curvature optimization
+            insurf,
+            image,
+            seg,
+            target_curv=None,
             mesh_repulse=None,  # surfa mesh to use for repulsive force (push pial from white)
-            seg=None,           # Label map used for calculating boundary intensities (aseg)
             wm=None,            # wm.mgz, probably remove after debugging
             lut=None,           # Lookup table to determine left/right labels in seg
-            adaptive=False,     # flag to change loss weightings during optimization
             device=None,        # device to store all tensor-based classes/operations
             l_curvature=None,   # weighting for curvature loss
             l_intensity=None,   # weighting for intensity loss
@@ -38,9 +36,9 @@ class MRISPlaceSurface:
             n_grad_avgs=1,      # no. averages to start for loss smoothing (intensity only)
             vert_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
             surf_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
-            separate_loss_types=False,
+            separate_loss_types=True,
             smoothing_sigma=2.,  #
-            use_ggvf=True,
+            use_ggvf=False,
             targets_fname=None,  # name of file containing target intensities (probs debug only)
             borders_dict=None,  # dict containing border intensities
             surf='white',       # surface (pial or white)
@@ -56,15 +54,13 @@ class MRISPlaceSurface:
             'cuda' if device == 'gpu' and torch.cuda.is_available() else 'cpu'
         ) if not isinstance(device, torch.device) else device
 
-        # Optimization parameters
-        self.adaptive = adaptive
         self.verbose = verbose
 
         self.log = log
         if self.log is not None and os.path.isfile(self.log):
             open(self.log, 'w').close()
 
-        # Set up loss dictionaries
+        # Initialize loss weightings
         weights = [
             l_curvature,
             l_intensity,
@@ -83,9 +79,6 @@ class MRISPlaceSurface:
         if l_surf_repulse is not None and l_surf_repulse > 0:
             self.manual_grad_losses_dict['cost_surface_repulsion'] = l_surf_repulse
 
-        do_intensity_loss = 'cost_intensity' in self.manual_grad_losses_dict.keys()
-        do_surface_repulsion_loss = 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys()
-            
         self.autograd_losses_dict = {}
         if l_curvature is not None and l_curvature > 0:
             self.autograd_losses_dict['cost_curvature'] = l_curvature
@@ -97,53 +90,36 @@ class MRISPlaceSurface:
                 0. if l_nspring is None else l_nspring, 0. if l_tspring is None else l_tspring
             ]
 
-        do_curvature_loss = 'cost_curvature' in self.autograd_losses_dict.keys()
-        do_vertex_repulsion_loss = 'cost_vertex_repulsion' in self.autograd_losses_dict.keys()
-        do_spring_loss = 'cost_spring' in self.autograd_losses_dict.keys()
-
-        self.separate_loss_types = separate_loss_types
+        self.separate_loss_types = True
 
         # Initialize mesh to be optimized
         self.surf = surf
         self.hemi = hemi
+        self.fix_mtl = (self.surf == 'pial')
 
-        self.fix_mtl = surf == 'pial'
-
-        if in_pial is None and in_white is None:
-            utils.fatal('[MRISPlaceSurface] error: must provide at least one input surface')
-        if in_pial is not None and in_white is not None:
-            utils.fatal('[MRISPlaceSurface] error: joint placement of pial and white surfaces not '
-                        'implemented :(')
-
-        self.mesh = in_white.copy() if in_pial is None else in_pial.copy()
+        self.mesh = sf.load_mesh(insurf)
+        
         self.tmesh = TensorMesh(
             mesh=self.mesh,
             device=self.device,
             verts_requires_grad=True,
+            compute_proximity_tree=('cost_vertex_repulsion' in self.autograd_losses_dict.keys()),
             proximity_ratio=vert_prox_ratio,
         )
         
         # Target curvature?
-        self.use_curvature_residuals = mesh_target is None
-
-        if mesh_target:
-            tmesh_target = TensorMesh(mesh=mesh_target, compute_proximity_tree=False)
-            M = tmesh_target.neighbor_displacements(pair_type='2hop', return_mask=False)
-            u = (M * tmesh_target.vert_tangents0.unsqueeze(dim=1)).sum(dim=-1, keepdims=True)
-            v = (M * tmesh_target.vert_tangents1.unsqueeze(dim=1)).sum(dim=-1, keepdims=True)
-            w = (M * tmesh_target.vert_norms.unsqueeze(dim=1)).sum(dim=-1, keepdims=True)
-            B = utils.GLM(torch.cat([u * u, 2 * u * v, v * v], dim=-1), w)
-            self.target_curvature = B[:, 0] + B[:, 2]
-        else:
-            self.target_curvature = None
+        self.use_curvature_residuals = target_curv is None
+        
+        self.target_curvature = (
+            None if target_curv is None
+            else torch.tensor(
+                    sf.load_volume(target_curv).data.astype(np.float32).squeeze(axis=-1)
+            ).to(self.device)
+        )
 
         # Repulsive force?
-        if do_surface_repulsion_loss:
-            mesh_repulse = (
-                mesh_repulse if mesh_repulse
-                else in_white.copy() if in_pial is None
-                else in_pial.copy()
-            )
+        if 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys():
+            mesh_repulse = self.mesh.copy()
             self.repulsion_kdtree = cKDTree(mesh_repulse.vertices)
 
             self.tmesh_repulsion = TensorMesh(
@@ -156,12 +132,12 @@ class MRISPlaceSurface:
             self.tmesh_repulsion = None
             
         # Initialize ripped verts and surface placement mask with aseg/lut
-        tseg = TensorImage(seg, dtype='int', device=self.device)
+        tseg = TensorImage(sf.load_volume(seg), dtype='int', device=self.device)
+        lut = sf.load_label_lookup(lut)
         self._set_fixed_vertices(tseg, lut)
-        #self._generate_surface_mask(tseg, lut)
 
         # Determine target intensities for vertex placement
-        if do_intensity_loss:
+        if 'cost_intensity' in self.manual_grad_losses_dict.keys():
             self.n_grad_avgs = n_grad_avgs
             self.smoothing_sigma = smoothing_sigma
 
@@ -171,13 +147,9 @@ class MRISPlaceSurface:
             if seg is None:
                 utils.fatal('[MRISPlaceSurface] error: must provide label map if using intensity '
                             'loss')
-            self.image = image
+            image = sf.load_volume(image)
             self.timage = TensorImage(image, do_smoothing=True, device=device)
             self.ggvf = GGVF(image, device=device)
-            
-            #self.timage.data = self.timage.data * (~self.surface_mask.data.to(torch.bool))
-            #sf.Volume(self.timage.data.cpu().numpy()).save('test.mgz')
-            #sf.Volume(self.surface_mask.data.cpu().numpy()).save('mask.mgz')
             
             """
             Right now this is hard coded from autodet.gw.stats.lh.dat, but will replace with 
@@ -209,18 +181,8 @@ class MRISPlaceSurface:
                     T1=self.timage.data, seg=tseg.data, wm=None, lut=lut
                 ).compute_border_stats(gm_lo=30, gm_hi=110, use_modes=True, which='white')
                 """
-                if not targets_fname:
-                    self._calculate_target_intensities = (
-                        self._calculate_target_intensities_ggvf if use_ggvf
-                        else self._calculate_target_intensities_FS
-                    )
-                    self._calculate_target_intensities(n_avg_iters=5)
-                else:
-                    self.target_intensities = torch.tensor(
-                        np.loadtxt(targets_fname), device=self.device, dtype=torch.float
-                    ).unsqueeze(dim=-1)
-                    self.has_valid_intensity = (~self.rip_verts_flag)
-        
+                self._calculate_target_intensities_ggvf(n_avg_iters=5)
+
     def _set_fixed_vertices(self, tseg, lut):
         """
         Determines vertices that should remain fixed in initial position during surface placement.
@@ -460,7 +422,6 @@ class MRISPlaceSurface:
             found, target_idxs, (n_pts - 1) - is_any_candidate.int().flip(dims=(-1,)).argmax(dim=-1)
         )
         found = found | found_any_candidate
-        found[target_idxs == ((n_pts - 1) // 2)] = False
 
         # Get target intensities/positions
         self.target_intensities = torch.zeros((nverts,), dtype=I.dtype, device=self.device)
@@ -736,7 +697,7 @@ class MRISPlaceSurface:
             eps = B[:, -1]
         else:
             B = utils.GLM(torch.cat([u * u, 2 * u * v, v * v], dim=-1), w)
-            curv = B[:, 0] + B[:, 2]
+            curv = (B[:, 0] + B[:, 2])
             eps = self.target_curvature - curv
 
         # Exclude ripped center verts
@@ -811,6 +772,7 @@ class MRISPlaceSurface:
         - dot is dot product between dxyz and normal
         - dxyz is distance between coords in bin
         """
+
         # Update proximity tree
         with torch.no_grad():
             self._compute_intersurface_proximity_tree()
@@ -848,11 +810,11 @@ class MRISPlaceSurface:
         scale[self.rip_verts_flag] = 0
         grad = -1 * scale.sum(dim=1, keepdim=True) * self.tmesh.vert_norms.detach()
         grad_smoothed = self.tmesh.smooth_over_neighbors(
-            grad, mask=self.rip_verts_flag, N_avgs=5, n_hops=1, signed=True
+            grad, mask=(~self.rip_verts_flag), N_avgs=5, n_hops=1, signed=True
         )
 
         return weight * (1. / n_valid) * repulsion.sum(), weight * (1. / n_valid) * grad_smoothed
-            
+    
     def cost_vertex_repulsion(self, weight=1.):
         """
         Repulsion energy cost (between verts of a single surface)
@@ -1281,7 +1243,6 @@ class MRISPlaceSurface:
                 if state.get('d') is not None:
                     state['d'] = (X - X_prev).flatten().clone()
                     state['t'] = 1.
-            #breakpoint()
 
         # Update input surfa mesh
         self.mesh.vertices = self.tmesh.verts.detach().cpu()

@@ -152,7 +152,9 @@ class TensorMesh:
 
         # Remove 1-hop neighbors
         nbrs = self.vert_neighbors_2hop
-        rows = torch.arange(self.nverts).unsqueeze(1).expand_as(self.vert_neighbors_2hop)
+        rows = (
+            torch.arange(self.nverts).unsqueeze(1).expand_as(self.vert_neighbors_2hop)
+        ).to(self.device)
         valid = ~torch.isin(i * self.nverts + j, rows[nbrs > -1] * self.nverts + nbrs[nbrs > -1])
         i, j = i[valid], j[valid]
 
@@ -161,11 +163,11 @@ class TensorMesh:
         i, j = i[order], j[order]
         counts = torch.bincount(i, minlength=self.nverts)
         starts = torch.cumsum(counts, dim=0) - counts
-        col = torch.arange(i.numel()) - starts[i]
+        col = torch.arange(i.numel()).to(self.device) - starts[i]
 
         self.vert_proximity_tree = torch.full(
             (self.nverts, max(counts.max().item(), 1)), -1, dtype=torch.long
-        )
+        ).to(self.device)
         self.vert_proximity_tree[i, col] = j
         
         self.vert_nproximity = (self.vert_proximity_tree != -1).sum(dim=1)
@@ -406,7 +408,10 @@ class TensorMesh:
 
         # Remove outliers?
         if remove_outliers:
-            is_outlier = (vec > (vec.mean() + 2 * vec.std())) | (vec < (vec.mean() - 2 * vec.std()))
+            is_outlier = (
+                (vec > (vec[mask].mean() + 2 * vec[mask].std()))
+                | (vec < (vec[mask].mean() - 2 * vec[mask].std()))
+            )
             mask &= (~is_outlier).squeeze()
 
         # Parse valid neighbors

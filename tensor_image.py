@@ -278,7 +278,7 @@ class GGVF(TensorImage):
         # GGVF
         grad = self.gradient_image(img=self.smooth()).movedim(-1, 0).float()
         mag = grad.norm(dim=0, keepdim=True)
-        g = torch.exp(-1. * mag / self.K)
+        g = torch.exp(-1. * (mag / mag.max()) / self.K)
         h = 1.0 - g
 
         dt = 1. / (6. * g.max().item())
