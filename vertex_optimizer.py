@@ -118,7 +118,7 @@ class MRISPlaceSurface:
 
         # Repulsive force?
         if 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys():
-            mesh_repulse = self.mesh.copy() if mesh_repulse is not None else sf.load_mesh(mesh_repulse)
+            mesh_repulse = self.mesh.copy() if mesh_repulse is None else sf.load_mesh(mesh_repulse)
             self.repulsion_kdtree = cKDTree(mesh_repulse.vertices)
 
             self.tmesh_repulsion = TensorMesh(
