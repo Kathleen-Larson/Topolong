@@ -412,7 +412,7 @@ class TensorMesh:
                 (vec > (vec[mask].mean() + 2 * vec[mask].std()))
                 | (vec < (vec[mask].mean() - 2 * vec[mask].std()))
             )
-            mask &= (~is_outlier).squeeze()
+            mask = mask & (~is_outlier).squeeze()
 
         # Parse valid neighbors
         neighbors = self.vert_neighbors_2hop if n_hops == 2 else self.vert_neighbors_1hop
@@ -436,6 +436,7 @@ class TensorMesh:
         
         if remove_outliers:
             vec[is_outlier] = vec[mask].mean()
+
         return vec
 
     def smooth_verts(self, X=None, n_iters=1, idxs=None, exclude_ripped=True):
