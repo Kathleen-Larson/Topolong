@@ -148,13 +148,18 @@ class MRISPlaceSurface:
                             'loss')
             image = sf.load_volume(image)
             self.timage = TensorImage(image, do_smoothing=True, device=device)
-            
+
+            # Do masking
+            self._generate_surface_mask(tseg, lut)
+            self.timage.data[self.surface_mask.data.bool()] = 0
+            image.data[self.surface_mask.data.bool().cpu()] = 0
             """
             Right now this is hard coded from autodet.gw.stats.lh.dat, but will replace with 
             border_stats.py after debugging
             """
 
             with torch.no_grad():
+                """
                 white_dict = {
                     'border_hi': 110.363342,
                     'border_lo': 61.000000,
@@ -177,8 +182,8 @@ class MRISPlaceSurface:
                 """
                 self.borders_dict = BorderStatsGenerator(
                     T1=self.timage.data, seg=tseg.data, wm=None, lut=lut
-                ).compute_border_stats(gm_lo=30, gm_hi=110, use_modes=True, which='white')
-                """
+                ).compute_border_stats(gm_lo=30, gm_hi=110, use_modes=True, which=self.surf)
+
                 if use_ggvf:
                     self.ggvf = GGVF(image, device=device)
                     self._calculate_target_intensities_ggvf(n_avg_iters=5)
