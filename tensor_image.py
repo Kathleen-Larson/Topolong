@@ -109,7 +109,7 @@ class TensorImage:
         # Sample at normalized coords
         data = _unsqueeze(self.data, dim=0, N=(5 - len(self.data.shape)))
         values = torch.nn.functional.grid_sample(
-            self.data if self.data.is_floating_point() else self.data.float(),
+            data if self.data.is_floating_point() else data.float(),
             grid.float(), mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N).to(self.dtype)
         
@@ -141,7 +141,7 @@ class TensorImage:
         # Interpolate
         data = _unsqueeze(self.data, dim=0, N=(5 - len(self.data.shape)))
         values = torch.nn.functional.grid_sample(
-            self.data if data.is_floating_point() else self.data.float(),
+            data if data.is_floating_point() else data.float(),
             grid.float(), mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N, 2 * K)
 
