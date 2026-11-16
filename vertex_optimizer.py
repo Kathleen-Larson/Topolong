@@ -191,7 +191,7 @@ class MRISPlaceSurface:
                     self._calculate_target_intensities_ggvf(n_avg_iters=5)
                 else:
                     self._calculate_target_intensities_FS(n_avg_iters=5)
-
+        breakpoint()
     def _set_fixed_vertices(self, tseg, lut):
         """
         Determines vertices that should remain fixed in initial position during surface placement.

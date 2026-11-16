@@ -4,7 +4,7 @@ import numpy as np
 import time
 
 import torch
-import F as F
+import torch.nn.functional as F
 
 from scipy.spatial import cKDTree
 
@@ -250,31 +250,30 @@ class GGVF(TensorImage):
         """
         Compute the GGVF field (and edge map)
         """
-        # Laplacian kernel
-        lap = torch.zeros(((1, 1) + (self.ndims,) * self.ndims), dtype=self.dtype).to(self.device)
-        if self.ndims == 3:
-            lap[0, 0, 1, 1, 1] = -6.
-            lap[0, 0, 0, 1, 1] = 1.
-            lap[0, 0, 2, 1, 1] = 1.
-            lap[0, 0, 1, 0, 1] = 1.
-            lap[0, 0, 1, 2, 1] = 1.
-            lap[0, 0, 1, 1, 0] = 1.
-            lap[0, 0, 1, 1, 2] = 1.
-        else:
-            utils.fatal('Error in GGVF: only implemented for ndims == 3')
-
-        # GGVF
+        # Gradient image
         grad = self.gradient_image(img=self.smooth()).movedim(-1, 0).float()
         mag = grad.norm(dim=0, keepdim=True)
         g = torch.exp(-1. * (mag / mag.max()) / self.K)
         h = 1.0 - g
-
         dt = 1. / (6. * g.max().item())
+
+        # Constant terms w/in ggvf calculation
+        g_dt = dt * g
+        hg_dt = dt * h * grad
+        h_dt_1 = 1. - dt * h
+
+        # Iterate w/ Laplacian
         V = grad.clone()
+        lapV = torch.empty_like(V)
 
         for it in range(self.n_iters):
-            Vp = F.pad(V.unsqueeze(dim=1), (1, 1, 1, 1, 1, 1), mode='replicate')
-            lapV = F.conv3d(Vp, lap).squeeze(dim=1)
-            V = V + dt * (g * lapV - h * (V - grad))
+            Vp = F.pad(V.unsqueeze(dim=1), (1,) * 6, mode='replicate').squeeze(dim=1)
+            torch.add(Vp[:, 2:, 1:-1, 1:-1], Vp[:, :-2, 1:-1, 1:-1], out=lapV)
+            lapV += Vp[:, 1:-1, 2:, 1:-1]
+            lapV += Vp[:, 1:-1, :-2, 1:-1]
+            lapV += Vp[:, 1:-1, 1:-1, 2:]
+            lapV += Vp[:, 1:-1, 1:-1, :-2]
+            lapV.add_(V, alpha=-6.).mul_(g_dt)
+            V.mul_(h_dt_1).add_(lapV).add_(hg_dt)
 
         self.data = V
