@@ -31,11 +31,11 @@ class MRISPlaceSurface:
             l_intensity=None,   # weighting for intensity loss
             l_nspring=None,     # weighting for spring energy loss (normal component)
             l_tspring=None,     # weighting for spring energy loss (tangential component)
-            l_vert_repulse=None,   # weighting for vertex repulsion energy loss
-            l_surf_repulse=None,   # weighting for surface repulsion energy loss
+            l_within_surf=None,   # weighting for vertex repulsion energy loss
+            l_between_surf=None,   # weighting for surface repulsion energy loss
             n_grad_avgs=1,      # no. averages to start for loss smoothing (intensity only)
-            vert_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
-            surf_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
+            wsurf_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
+            bsurf_prox_ratio=0.05,  # % of mesh bbox to include in proximity tree (for debugging)
             smoothing_sigma=2.,  #
             use_ggvf=False,
             targets_fname=None,  # name of file containing target intensities (probs debug only)
@@ -65,8 +65,8 @@ class MRISPlaceSurface:
             l_intensity,
             l_nspring,
             l_tspring,
-            l_vert_repulse,
-            l_surf_repulse
+            l_within_surf,
+            l_between_surf
         ]
         if all(l is None for l in weights):
             utils.fatal('[MRISPlaceSurface] error: must provide at least one non-zero weighting '
@@ -75,14 +75,14 @@ class MRISPlaceSurface:
         self.manual_grad_losses_dict = {}
         if l_intensity is not None and l_intensity > 0:
             self.manual_grad_losses_dict['cost_intensity'] = l_intensity
-        if l_surf_repulse is not None and l_surf_repulse > 0:
-            self.manual_grad_losses_dict['cost_surface_repulsion'] = l_surf_repulse
+        if l_between_surf is not None and l_between_surf > 0:
+            self.manual_grad_losses_dict['cost_surface_repulsion'] = l_between_surf
 
         self.autograd_losses_dict = {}
         if l_curvature is not None and l_curvature > 0:
             self.autograd_losses_dict['cost_curvature'] = l_curvature
-        if l_vert_repulse is not None and l_vert_repulse > 0:
-            self.autograd_losses_dict['cost_vertex_repulsion'] = l_vert_repulse
+        if l_within_surf is not None and l_within_surf > 0:
+            self.autograd_losses_dict['cost_within_surf_repulsion'] = l_within_surf
             
         if (l_nspring is not None and l_nspring > 0) or (l_tspring is not None and l_tspring > 0):
             self.autograd_losses_dict['cost_spring'] = [
@@ -102,8 +102,10 @@ class MRISPlaceSurface:
             mesh=self.mesh,
             device=self.device,
             verts_requires_grad=True,
-            compute_proximity_tree=('cost_vertex_repulsion' in self.autograd_losses_dict.keys()),
-            proximity_ratio=vert_prox_ratio,
+            compute_proximity_tree=(
+                'cost_within_surf_repulsion' in self.autograd_losses_dict.keys()
+            ),
+            proximity_ratio=wsurf_prox_ratio,
         )
         
         # Target curvature?
@@ -124,7 +126,7 @@ class MRISPlaceSurface:
             self.tmesh_repulsion = TensorMesh(
                 mesh_repulse, compute_proximity_tree=False, device=self.device
             )
-            self.surf_prox_ratio = surf_prox_ratio
+            self.bsurf_prox_ratio = bsurf_prox_ratio
             self._compute_intersurface_proximity_tree()
 
         else:
@@ -340,8 +342,6 @@ class MRISPlaceSurface:
         nverts = self.tmesh.nverts
         eps = 1e-5
 
-        vno = 76133
-
         step_sz = 0.1 * step_factor * self.timage.voxsize[0]
         max_dist *= step_factor
         n_steps = int((max_dist / self.timage.voxsize.min()).ceil().item() / step_sz)
@@ -365,12 +365,9 @@ class MRISPlaceSurface:
                 field = self.ggvf.interpolate(xn).transpose(0, 1)
                 field = field.to(R.dtype) @ R.T
                 mag = field.norm(dim=-1, keepdim=True)
-                dirs = step_sz * (field / mag.clamp(min=eps))
                 
                 # Update search position
                 x[:, n + 1, :] = xn + sign * step_sz * (field / mag.clamp(min=eps))
-                #x_vox = self.timage.transform(xn, geom='surf2vox') + dirs
-                #x[:, n + 1, :] = self.timage.transform(x_vox, geom='vox2surf')
 
             return x[:, 1:, :]
 
@@ -635,11 +632,11 @@ class MRISPlaceSurface:
         for points of another surface instead of itself
         """
 
-        if not self.surf_prox_ratio:
-            self.surf_prox_ratio = proximity_ratio
+        if not self.bsurf_prox_ratio:
+            self.bsurf_prox_ratio = proximity_ratio
 
         # Query tree
-        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.surf_prox_ratio
+        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.bsurf_prox_ratio
         dist, idx = self.repulsion_kdtree.query(
             self.tmesh.verts.detach().cpu().numpy(), k=64, distance_upper_bound=max_dist, workers=-1
         )
@@ -822,9 +819,9 @@ class MRISPlaceSurface:
 
         return weight * (1. / n_valid) * repulsion.sum(), weight * (1. / n_valid) * grad_smoothed
     
-    def cost_vertex_repulsion(self, weight=1.):
+    def cost_within_surf_repulsion(self, weight=1.):
         """
-        Repulsion energy cost (between verts of a single surface)
+        Within surface repulsion energy cost (between verts of a single surface)
         """
         # Q: how to calculate bin ???
         min_dist = 1.0 #* 10 (uncomment for phantoms)
@@ -1015,7 +1012,7 @@ class MRISPlaceSurface:
         f, g = eval_fg(X.detach().clone())
         S, Y, rho = [], [], []
         frozen = None
-        
+        breakpoint()
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
             q = g.clone()
@@ -1116,7 +1113,6 @@ class MRISPlaceSurface:
 
             # Check for bad vert movement (intersections or in wrong tissue)
             Xt_fix, idxs = self.remove_intersections(Xt.clone(), return_idxs=True)
-            #Xt_fix = self.mask_displacement(Xt_fix, X0)
             frozen = None
 
             if not torch.equal(Xt_fix, Xt):
@@ -1137,7 +1133,7 @@ class MRISPlaceSurface:
                 print('  history update skipped')
 
         # Finish and exit
-        self.remove_intersections(X)
+        X = self.remove_intersections(X)
         self.tmesh._update_vert_properties(X)
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
         
