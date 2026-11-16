@@ -4,7 +4,7 @@ import numpy as np
 import time
 
 import torch
-import torch.nn as nn
+import F as F
 
 from scipy.spatial import cKDTree
 
@@ -108,7 +108,7 @@ class TensorImage:
         
         # Sample at normalized coords
         data = _unsqueeze(self.data, dim=0, N=(5 - len(self.data.shape)))
-        values = torch.nn.functional.grid_sample(
+        values = F.grid_sample(
             data if self.data.is_floating_point() else data.float(),
             grid.float(), mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N).to(self.dtype)
@@ -140,7 +140,7 @@ class TensorImage:
 
         # Interpolate
         data = _unsqueeze(self.data, dim=0, N=(5 - len(self.data.shape)))
-        values = torch.nn.functional.grid_sample(
+        values = F.grid_sample(
             data if data.is_floating_point() else data.float(),
             grid.float(), mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N, 2 * K)
@@ -161,31 +161,17 @@ class TensorImage:
 
     def gradient_image(self, img=None, step_sz=None, order=1):
         """
-        Computes the gradient vector image of self.data
+        Computes the gradient vector image w/ central differences
         """
-        img = self.data if img is None else img
-        step_sz = 0.5 * self.voxsize if step_sz is None else step_sz
-        
-        # Generate voxel grids
-        x, y, z = torch.meshgrid(
-            [torch.arange(X, device=self.device) for X in self.data.shape], indexing='ij'
-        )
-        grid = torch.stack([x.flatten(), y.flatten(), z.flatten()], dim=-1)
+        img = F.pad(
+            (self.data if img is None else img)[None, None].float(), (1,) * 6, mode='replicate'
+        )[0, 0]
 
-        I = torch.eye(self.ndims, device=self.device).unsqueeze(dim=1)
-        grid_b = grid - step_sz * I
-        grid_f = grid + step_sz * I
-
-        # Sample and compute gradient
-        def sample(g):
-            g = (((2 * g / (self.shape - 1)) - 1)).view(1, 1, 1, -1, self.ndims).flip(dims=(-1,))
-            values = torch.nn.functional.grid_sample(
-                _unsqueeze(img, dim=0, N=2).double(),
-                g, mode='bilinear', padding_mode='border', align_corners=True
-            )
-            return values.reshape(self.ndims, *self.data.shape).float()
-
-        grad = (sample(grid_f) - sample(grid_b)).movedim(0, -1) / (2 * step_sz)
+        grad = torch.stack([
+            0.5 * (img[2:, 1:-1, 1:-1] - img[:-2, 1:-1, 1:-1]),
+            0.5 * (img[1:-1, 2:, 1:-1] - img[1:-1, :-2, 1:-1]),
+            0.5 * (img[1:-1, 1:-1, 2:] - img[1:-1, 1:-1, :-2]),
+        ], dim=-1)
         return grad
         
     def smooth(self, img=None, sigma=1.):
@@ -287,8 +273,8 @@ class GGVF(TensorImage):
         V = grad.clone()
 
         for it in range(self.n_iters):
-            Vp = torch.nn.functional.pad(V.unsqueeze(dim=1), (1, 1, 1, 1, 1, 1), mode='replicate')
-            lapV = torch.nn.functional.conv3d(Vp, lap).squeeze(dim=1)
+            Vp = F.pad(V.unsqueeze(dim=1), (1, 1, 1, 1, 1, 1), mode='replicate')
+            lapV = F.conv3d(Vp, lap).squeeze(dim=1)
             V = V + dt * (g * lapV - h * (V - grad))
 
         self.data = V
