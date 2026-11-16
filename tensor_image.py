@@ -36,7 +36,7 @@ class TensorImage:
                 dtype=(torch.int if dtype=='int' else torch.float)
             ).to(self.device)
 
-            ref_image = image.copy()
+            ref_image = self.image
 
         elif torch.is_tensor(image):
             self.data = image.to(torch.int if dtype=='int' else torch.float)
@@ -115,7 +115,8 @@ class TensorImage:
         
         return values
 
-    def _interp_derivative(self, coords, dirs, sigma=None, mode='bilinear', flip_sign=False, geom='surf2vox'):
+    def _interp_derivative(self, coords, dirs, sigma=None, mode='bilinear', flip_sign=False,
+                           geom='surf2vox'):
         """
         Doing the same thing that MRIsampleVolumeDerivativeScale does in utils/mri.cpp
         """        
@@ -140,7 +141,7 @@ class TensorImage:
         # Interpolate
         data = _unsqueeze(self.data, dim=0, N=(5 - len(self.data.shape)))
         values = torch.nn.functional.grid_sample(
-            data if data.is_floating_point() else data.float(),
+            self.data if data.is_floating_point() else self.data.float(),
             grid.float(), mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N, 2 * K)
 

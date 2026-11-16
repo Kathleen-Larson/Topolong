@@ -635,7 +635,9 @@ class MRISPlaceSurface:
             self.bsurf_prox_ratio = proximity_ratio
 
         # Query tree
-        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.bsurf_prox_ratio
+        max_dist = np.min(
+            np.diff(np.stack(self.mesh.bbox()), axis=0)
+        ).item() * self.bsurf_prox_ratio
         dist, idx = self.repulsion_kdtree.query(
             self.tmesh.verts.detach().cpu().numpy(), k=64, distance_upper_bound=max_dist, workers=-1
         )
@@ -1011,7 +1013,7 @@ class MRISPlaceSurface:
         f, g = eval_fg(X.detach().clone())
         S, Y, rho = [], [], []
         frozen = None
-        breakpoint()
+        
         # Do the 2 loop recursive optimizing
         for i in range(max_steps):
             q = g.clone()
