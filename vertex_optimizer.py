@@ -362,13 +362,12 @@ class MRISPlaceSurface:
             for n in range(n_steps):
                 # Interpolate GGVF field at verts
                 xn = x[:, n, :]
-                field = self.ggvf.interpolate(xn).transpose(0, 1)
-                field = field.to(R.dtype) @ R.T
-                mag = field.norm(dim=-1, keepdim=True)
+                field = self.ggvf.interpolate(xn).transpose(0, 1).to(R.dtype) @ R.T
                 
                 # Update search position
-                x[:, n + 1, :] = xn + sign * step_sz * (field / mag.clamp(min=eps))
-
+                x[:, n + 1, :] = (
+                    xn + sign * step_sz * (field / field.norm(dim=-1, keepdim=True).clamp(min=eps))
+                )
             return x[:, 1:, :]
 
         pts[valid, :n_steps , :] = build_ggvf_profile(sign=1).flip(dims=(1,))
