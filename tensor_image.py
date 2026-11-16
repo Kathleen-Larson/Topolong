@@ -30,21 +30,21 @@ class TensorImage:
         
         # Image data
         if isinstance(image, sf.Volume):
-            self.image = image
+            self.image = image.copy()
             self.data = torch.tensor(
-                image.data.astype(np.int32 if dtype=='int' else np.float32),
+                self.image.data.astype(np.int32 if dtype=='int' else np.float32),
                 dtype=(torch.int if dtype=='int' else torch.float)
             ).to(self.device)
 
-            ref_image = image
+            ref_image = image.copy()
 
         elif torch.is_tensor(image):
             self.data = image.to(torch.int if dtype=='int' else torch.float)
             if ref_image is None:
                 utils.fatal('Error in TensorImage: ref_image required if input is tensor')
 
-            ref_image = ref_image.image if isinstance(ref_image, TensorImage) else ref_image
-            self.image = ref_image
+            ref_image = ref_image.image if isinstance(ref_image, TensorImage) else ref_image.copy()
+            self.image = ref_image.copy()
             self.image.data = image.cpu().numpy()
                 
         self.ndims = 3
@@ -107,10 +107,10 @@ class TensorImage:
         grid = _unsqueeze(((2 * grid / (self.shape - 1)) - 1), dim=0, N=3).flip(dims=(-1,))
         
         # Sample at normalized coords
-        n = 5 - len(self.data.shape)
+        data = _unsqueeze(self.data, dim=0, N=(5 - len(self.data.shape)))
         values = torch.nn.functional.grid_sample(
-            _unsqueeze(self.data, dim=0, N=n).double(),
-            grid, mode=mode, padding_mode='border', align_corners=True
+            self.data if self.data.is_floating_point() else self.data.float(),
+            grid.float(), mode=mode, padding_mode='border', align_corners=True
         ).reshape(-1, N).to(self.dtype)
         
         return values
@@ -138,10 +138,11 @@ class TensorImage:
         grid = ((2 * grid / (self.shape - 1)) - 1).view(1, 1, 1, -1, 3).flip(dims=(-1,))
 
         # Interpolate
+        data = _unsqueeze(self.data, dim=0, N=(5 - len(self.data.shape)))
         values = torch.nn.functional.grid_sample(
-            _unsqueeze(self.data, dim=0, N=2).double(),
-            grid, mode=mode, padding_mode='border', align_corners=True
-        ).reshape(-1, N, 2 * K).float()
+            data if data.is_floating_point() else data.float(),
+            grid.float(), mode=mode, padding_mode='border', align_corners=True
+        ).reshape(-1, N, 2 * K)
 
         # Combine
         k = (
