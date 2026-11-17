@@ -69,7 +69,7 @@ opt = MRISPlaceSurface(
     l_within_surf=L_vrp,
     l_between_surf=L_srp,    
     borders_dict=borders_dict,
-    use_ggvf=False,
+    use_ggvf=True,
     verbose=True
 )
 
