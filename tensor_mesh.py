@@ -36,8 +36,8 @@ class TensorMesh:
         # Store data from mesh
         self.mesh = mesh
         self.verts = torch.tensor(mesh.vertices, dtype=torch.float, device=self.device)
-        self.tris = torch.tensor(mesh.faces, device=self.device)
-
+        self.tris = torch.tensor(mesh.faces, dtype=torch.long, device=self.device)
+        
         if verts_requires_grad:
             self.verts.requires_grad = True
 
@@ -75,47 +75,60 @@ class TensorMesh:
         """
         Get all triangles containing each vertex (and its indices w/in the tri data)
         """
-        # Map vertices within triangles
-        vert_tris, vert_tri_idxs = list(
-            map(list, zip(*[torch.where(self.tris == v) for v in range(self.nverts)]))
-        )
-        self.vert_tris = pad_sequence(vert_tris, batch_first=True, padding_value=-1)
-        self.vert_tri_idxs = pad_sequence(vert_tri_idxs, batch_first=True, padding_value=-1)
+        # Sort flattened tris by vertex
+        tris_by_vert = self.tris.flatten()
+        order = torch.argsort(tris_by_vert, stable=True)
+        tris_by_vert = tris_by_vert[order]
 
-        # Set device
-        self.vert_tris = self.vert_tris.to(self.device)
-        self.vert_tri_idxs = self.vert_tri_idxs.to(self.device)
+        counts = torch.bincount(tris_by_vert, minlength=self.nverts)
+        col = (
+            torch.arange(tris_by_vert.numel(), device=self.device)
+            - (torch.cumsum(counts, dim=0) - counts)[tris_by_vert]
+        )
+
+        # Pack into tensors (-1 padded)
+        self.vert_tris = torch.full(
+            (self.nverts, counts.max().item()), -1, dtype=torch.long, device=self.device
+        )
+        self.vert_tris[tris_by_vert, col] = order // 3
+
+        self.vert_tri_idxs = torch.full_like(self.vert_tris, -1)
+        self.vert_tri_idxs[tris_by_vert, col] = order % 3
         
     def _compute_neighbors(self):
         """
         Get lists of 1 and 2 hop neighbors
         """
+        nv = self.nverts
+
+        # Function to map each neighbor vertex id to its center vertex id
+        def pack(keys):
+            keys = torch.unique(keys)
+            rows, nbrs = keys // nv, keys % nv
+            rows, nbrs = rows[rows != nbrs], nbrs[rows != nbrs]
+            counts = torch.bincount(rows, minlength=nv)
+            col = (
+                torch.arange(rows.numel(), device=self.device)
+                - (torch.cumsum(counts, 0) - counts)[rows]
+            )
+            out = torch.full(
+                (nv, counts.max().item() + 1), -1, dtype=torch.long, device=self.device
+            )
+            out[:, 0] = torch.arange(nv, device=self.device)
+            out[rows, col + 1] = nbrs
+            return out
+        
         # One-hop neighbors
-        vert_neighbors_1hop = [
-            torch.unique(self.tris[self.vert_tris[v][self.vert_tris[v] != -1]].flatten())
-            for v in range(self.nverts)
-        ]
-        self.vert_neighbors_1hop = pad_sequence(
-            [torch.cat([
-                torch.tensor([v], device=self.device),
-                vert_neighbors_1hop[v][torch.where(vert_neighbors_1hop[v] != v)]
-            ]) for v in range(self.nverts)],
-            batch_first=True, padding_value=-1
+        self.vert_neighbors_1hop = pack(
+            (self.tris[:, :, None] * nv + self.tris[:, None, :]).flatten()
         )
         self.vert_nneighbors_1hop = (self.vert_neighbors_1hop != -1).sum(dim=1)
 
         # Two-hop neighbors
-        vert_neighbors_2hop = [
-            torch.unique(torch.cat([vert_neighbors_1hop[u] for u in vert_neighbors_1hop[v]]))
-            for v in range(self.nverts)
-        ]
-        self.vert_neighbors_2hop = pad_sequence(
-            [torch.cat([
-                torch.tensor([v], device=self.device),
-                vert_neighbors_2hop[v][torch.where(vert_neighbors_2hop[v] != v)]
-            ]) for v in range(self.nverts)],
-            batch_first=True, padding_value=-1
-        )
+        nbrs2 = self.vert_neighbors_1hop[self.vert_neighbors_1hop.clamp(min=0)]
+        valid = (self.vert_neighbors_1hop > -1).unsqueeze(dim=-1) & (nbrs2 > -1)
+        centers = torch.arange(nv, device=self.device)[:, None, None].expand_as(nbrs2)
+        self.vert_neighbors_2hop = pack((centers * nv + nbrs2)[valid])
         self.vert_nneighbors_2hop = (self.vert_neighbors_2hop != -1).sum(dim=1)
 
     def _compute_proximity_tree(self):
@@ -257,7 +270,7 @@ class TensorMesh:
             start=(-stepsize * N if direction in ['both', 'in'] else 0),
             end=(stepsize * N if direction in ['both', 'out'] else 0),
             steps=(N * 2 + 1 if direction == 'both' else N + 1),
-            device=self.device
+            dtype=torch.float, device=self.device
         )
         arr = torch.cat(
             [arr - (stepsize / 2), (arr[-1] + (stepsize / 2)).unsqueeze(dim=0)]
