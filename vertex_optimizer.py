@@ -1155,7 +1155,7 @@ class MRISPlaceSurface:
         self.tmesh._update_vert_properties(X)
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
 
-    def sgd_optimize(self, max_steps=100, lr=0.1, max_disp=0.3, momentum=0.5):
+    def sgd_optimize(self, max_steps=100, lr=1., max_disp=0.3, momentum=0.5):
         """
         Vertex placement with SGD optimizer
         """
