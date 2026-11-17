@@ -100,7 +100,7 @@ class TensorMesh:
                 torch.tensor([v], device=self.device),
                 vert_neighbors_1hop[v][torch.where(vert_neighbors_1hop[v] != v)]
             ]) for v in range(self.nverts)],
-            batch_first=True, padding_value=-1, device=self.device
+            batch_first=True, padding_value=-1
         )
         self.vert_nneighbors_1hop = (self.vert_neighbors_1hop != -1).sum(dim=1)
 
@@ -114,7 +114,7 @@ class TensorMesh:
                 torch.tensor([v], device=self.device),
                 vert_neighbors_2hop[v][torch.where(vert_neighbors_2hop[v] != v)]
             ]) for v in range(self.nverts)],
-            batch_first=True, padding_value=-1, device=self.device
+            batch_first=True, padding_value=-1
         )
         self.vert_nneighbors_2hop = (self.vert_neighbors_2hop != -1).sum(dim=1)
 
@@ -127,7 +127,7 @@ class TensorMesh:
         # Get all vertex pairs within radius
         max_dist = 1.0
         V = self.verts.detach().cpu().numpy()
-        pairs = torch.from_numpy(
+        pairs = torch.as_tensor(
             cKDTree(V).query_pairs(max_dist, output_type='ndarray'), device=self.device
         ).long()
 
@@ -302,7 +302,7 @@ class TensorMesh:
         ).norm(dim=-1).max(dim=1).values
         C = V[self.tris].mean(dim=1)
 
-        pairs = torch.from_numpy(
+        pairs = torch.as_tensor(
             cKDTree(C.cpu().numpy()).query_pairs(6., output_type='ndarray'), device=self.device
         ).long()
         tidxs_A, tidxs_B = pairs[:, 0], pairs[:, 1]

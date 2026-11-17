@@ -103,7 +103,7 @@ def GLM(X, y, compute_residuals=False):
         return yhat, res
     else:
         
-        return torch.linalg.inv(Xt @ X) @ Xt @ y
+        return torch.linalg.solve(Xt @ X, @ Xt @ y)
 
 def search_lut(lut, names):
     if names is None:
