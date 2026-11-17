@@ -1155,7 +1155,7 @@ class MRISPlaceSurface:
         self.tmesh._update_vert_properties(X)
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
 
-    def sgd_optimize(self, max_steps=100, lr=0.1, max_disp=0.3, momentum=0.9, nesterov=True):
+    def sgd_optimize(self, max_steps=100, lr=0.1, max_disp=0.3, momentum=0.5):
         """
         Vertex placement with SGD optimizer
         """
@@ -1182,46 +1182,43 @@ class MRISPlaceSurface:
 
             # Iterate through losses
             for func, weight in self.autograd_losses_dict.items():
-                L_total = L_total + getattr(self, func)(weight)
-
+                loss = getattr(self, func)(weight)
+                L_total = L_total + loss
                 if self.verbose:
-                    if n_printed > 0:
-                        loss_str += ' + '
-                    loss_str += f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
+                    loss_str += (' + ' if n_printed > 0 else '') + \
+                        f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
                     n_printed += 1
-
+                
             for func, weight in self.manual_grad_losses_dict.items():
                 loss, grad = getattr(self, func)(weight)
                 L_total = L_total + _ManualGradTerm.apply(X, loss.detach(), grad.detach())
-
                 if self.verbose:
-                    if n_losses > 0:
-                        loss_str += ' + '
-                    loss_str = f'{L_total.item():>.2e} = ' + loss_str
+                    loss_str += (' + ' if n_printed > 0 else '') + \
+                        f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
                     n_printed += 1
-                
-            L_total.backward()
+
+                L_total.backward()
 
             with torch.no_grad():
                 # Compute step (normalize s.t. median moving vert steps lr * max_disp, then cap)
                 g = X.grad
                 g[self.rip_verts_flag] = 0
-                gn = g.norm(dim=-1. keepdim=True)
+                gn = g.norm(dim=-1, keepdim=True)
                 step = -lr * max_disp * g / gn[~self.rip_verts_flag].median().clamp(min=1e-12)
                 v = momentum * v + step
                 v = v * (max_disp / v.norm(dim=-1, keepdim=True).clamp(min=max_disp))
                 
                 # Remove self intersections
                 X_new = self.remove_intersections(X + v)
-                v = torch.where(X_new != (X + v)).any(dim=-1, keepdim=True), 0, v)
+                v = torch.where((X_new != (X + v)).any(dim=-1, keepdim=True), 0, v)
                 X.copy_(X_new)
-
+            
             if self.verbose:
-                if n_losses > 1:
+                if len(self.losses_dict) > 1:
                     loss_str = f'{L_total.item():>.2e} = ' + loss_str
                 print('Loss =', loss_str)
-                print(f'  step {i}: loss {L_total.item():.2e}, '
-                      f'median disp {v.norm(dim=-1)[~self.rip_verts_flag].median():.3f} mm')
+                print(f'  median disp {v.norm(dim=-1)[~self.rip_verts_flag].median():.3f} mm')
+
 
             
         # Update input surfa mesh
