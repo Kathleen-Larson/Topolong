@@ -145,8 +145,8 @@ class TensorMesh:
         col = torch.arange(i.numel()).to(self.device) - starts[i]
 
         self.vert_proximity_tree = torch.full(
-            (self.nverts, max(counts.max().item(), 1)), -1, dtype=torch.long
-        ).to(self.device)
+            (self.nverts, max(counts.max().item(), 1)), -1, dtype=torch.long, device=self.device
+        )
         self.vert_proximity_tree[i, col] = j
         
         self.vert_nproximity = (self.vert_proximity_tree != -1).sum(dim=1)
