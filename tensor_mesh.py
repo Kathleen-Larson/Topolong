@@ -5,11 +5,9 @@ import functools
 import time
 
 from scipy.spatial import cKDTree
-#from scipy.sparse import coo_matrix
 
 import torch
 import torch.nn as nn
-from torch.nn.utils.rnn import pad_sequence
 
 import utils
 
@@ -308,25 +306,29 @@ class TensorMesh:
 
             return hits                
 
-        # Find all centroids within reach of eachother
+        # Find all centroids within reach of each other
         V = self.verts.detach() if X is None else X.detach()
-        dist = (2. / 3.) * (
-            V[self.tris][:, [1, 2, 0]] - V[self.tris]
-        ).norm(dim=-1).max(dim=1).values
-        C = V[self.tris].mean(dim=1)
+        T = V[self.tris]
+        dist = (2. / 3.) * (T[:, [1, 2, 0]] - T).norm(dim=-1).max(dim=1).values
+        C = T.mean(dim=1)
+
+        d = 2. * dist.max().item()
+        if d > 6.:
+            breakpoint()
 
         pairs = torch.as_tensor(
-            cKDTree(C.cpu().numpy()).query_pairs(6., output_type='ndarray'), device=self.device
+            cKDTree(C.cpu().numpy()).query_pairs(d, output_type='ndarray'), device=self.device
         ).long()
         tidxs_A, tidxs_B = pairs[:, 0], pairs[:, 1]
 
-        # Exclude tris that are too far apart, adjacent, or fully ripped
+        # Exclude tris that are too far apart
         valid = (C[tidxs_A] - C[tidxs_B]).norm(dim=-1) <= (dist[tidxs_A] + dist[tidxs_B])
+        tidxs_A, tidxs_B = tidxs_A[valid], tidxs_B[valid]
 
-        adjacent = (
+        # Exclude tris that are adjacent or fully ripped
+        valid = ~(
             self.tris[tidxs_A].unsqueeze(dim=2) == self.tris[tidxs_B].unsqueeze(dim=1)
-        ).flatten(1).any(dim=1)
-        valid &= ~adjacent
+        )
 
         if self.rip_verts_flag is not None:
             rip_tris = self.rip_verts_flag[self.tris].all(dim=1)
@@ -335,10 +337,10 @@ class TensorMesh:
         tidxs_A, tidxs_B = tidxs_A[valid], tidxs_B[valid]
 
         # Search if tris1 intersects with tris2 and vice versa
-        hits = torch.zeros(tidxs_A.shape[0], dtype=torch.bool, device=tidxs_A.device)
-        hits |= MollerTrumboreRayTriangle(V[self.tris[tidxs_A]], V[self.tris[tidxs_B]])
-        hits |= MollerTrumboreRayTriangle(V[self.tris[tidxs_B]], V[self.tris[tidxs_A]])
-        
+        hits = (
+            MollerTrumboreRayTriangle(V[self.tris[tidxs_A]], V[self.tris[tidxs_B]])
+            | MollerTrumboreRayTriangle(V[self.tris[tidxs_B]], V[self.tris[tidxs_A]])
+        )
         if not hits.any():
             return torch.zeros(self.nverts, dtype=torch.bool).to(self.device)
         
