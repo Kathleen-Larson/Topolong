@@ -1197,7 +1197,7 @@ class MRISPlaceSurface:
                         f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
                     n_printed += 1
 
-                L_total.backward()
+            L_total.backward()
 
             with torch.no_grad():
                 # Compute step (normalize s.t. median moving vert steps lr * max_disp, then cap)
