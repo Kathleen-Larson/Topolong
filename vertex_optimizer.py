@@ -602,7 +602,7 @@ class MRISPlaceSurface:
         # Get target intensities/positions
         self.target_intensities = torch.zeros((nverts,), dtype=I.dtype, device=self.device)
         self.target_intensities[found_idx] = I_up[found_idx, target_idxs[found_idx]]
-        breakpoint()
+
         self.target_pts = self.tmesh.verts.clone()
         self.target_pts[found_idx] = pts_up[found_idx, target_idxs[found_idx]]
         
@@ -778,11 +778,11 @@ class MRISPlaceSurface:
         - dot is dot product between dxyz and normal
         - dxyz is distance between coords in bin
         """
-
+        """
         # Update proximity tree
         with torch.no_grad():
             self._compute_intersurface_proximity_tree()
-        
+        """
         # Get distances between each vertex and another mesh
         valid_verts = self.intersurface_proximity_tree > -1
         valid_verts &= (~self.rip_verts_flag)[self.intersurface_proximity_tree]
@@ -1010,6 +1010,10 @@ class MRISPlaceSurface:
             return d * (d_cap / dn.clamp(min=d_cap))
 
         # Initialize
+        with torch.no_grad():
+            self._compute_intersurface_proximity_tree()
+	    self.tmesh._compute_proximity_tree()
+
         X = self.tmesh.verts
         f, g = eval_fg(X.detach().clone())
         S, Y, rho = [], [], []
@@ -1134,6 +1138,11 @@ class MRISPlaceSurface:
             if sy <= 1e-10:
                 print('  history update skipped')
 
+            # Update proximity trees
+            with torch.no_grad():
+                self._compute_intersurface_proximity_tree()
+		self.tmesh._compute_proximity_tree()
+
         # Finish and exit
         X = self.remove_intersections(X)
         self.tmesh._update_vert_properties(X)
@@ -1226,6 +1235,11 @@ class MRISPlaceSurface:
 
         # Run
         for i in range(max_steps):
+            # Update proximity trees
+	    with torch.no_grad():
+                self._compute_intersurface_proximity_tree()
+                self.tmesh._compute_proximity_tree()
+
             if self.verbose:
                 if self.log is not None:
                     with open(self.log, 'a') as log:
