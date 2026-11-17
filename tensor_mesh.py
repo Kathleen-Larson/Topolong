@@ -387,7 +387,7 @@ class TensorMesh:
         """
         
         if return_mask:
-            return disps, valid_neighbors
+            return disps, valid_neighbors.clone()
         else:
             return disps
 
