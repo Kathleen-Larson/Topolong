@@ -24,7 +24,6 @@ class TensorMesh:
             device=None,
             compute_proximity_tree=True,
             verts_requires_grad=False,
-            proximity_ratio=0.1
     ):
         """
         Triangular mesh topology represented by tensors of vertices and faces. This class is based
@@ -55,7 +54,6 @@ class TensorMesh:
 
         # Get LUT for each vertex containing non-neighbors within a min distance
         if compute_proximity_tree:
-            self.proximity_ratio = proximity_ratio
             self._compute_proximity_tree()
             
         # Set everything to correct device and compute vertex properties
@@ -125,39 +123,20 @@ class TensorMesh:
         Get all vertices within a certain distance (defined by a percentage of the mesh bounding 
         box) from center vertex, excluding 1 hop neighbors
         """
-
-        # Use the kdtree of the original surfa mesh to find all vertices within range
-        """
-        max_dist = np.min(np.diff(np.stack(self.mesh.bbox()), axis=0)).item() * self.proximity_ratio
-        close_verts = self.mesh.kdtree.query_ball_point(
-            self.verts.detach().cpu(), max_dist, return_sorted=False
-        )
-
-        self.vert_proximity_tree = pad_sequence(
-            [torch.tensor(
-                [x for x in close_verts[v] if x not in self.vert_neighbors_1hop[v]],
-                dtype=self.vert_neighbors_1hop[v].dtype
-            ) for v in range(self.nverts)],
-            batch_first=True, padding_value=-1
-        ).to(self.device)
-        """
-
+        
         # Get all vertex pairs within radius
         max_dist = 1.0
         V = self.verts.detach().cpu().numpy()
+        pairs = torch.from_numpy(
+            cKDTree(V).query_pairs(max_dist, output_type='ndarray')
+        ).long().to(self.device)
 
-        pairs = torch.from_numpy(cKDTree(V).query_pairs(max_dist, output_type='ndarray')).long()
-        pairs = torch.cat([pairs, pairs.flip(dims=(1,))]).to(self.device)
-        i, j = pairs[:, 0], pairs[:, 1]
-
-        # Remove 1-hop neighbors
-        nbrs = self.vert_neighbors_2hop
-        rows = (
-            torch.arange(self.nverts).unsqueeze(1).expand_as(self.vert_neighbors_2hop)
-        ).to(self.device)
-        valid = ~torch.isin(i * self.nverts + j, rows[nbrs > -1] * self.nverts + nbrs[nbrs > -1])
-        i, j = i[valid], j[valid]
-
+        # Remove neighbors
+        nbrs = self.vert_neighbors_1hop
+        pairs = pairs[~(nbrs[pairs[:, 0]] == pairs[:, 1:]).any(dim=1)]
+        i = torch.cat([pairs[:, 0], pairs[:, 1]])
+        j = torch.cat([pairs[:, 1], pairs[:, 0]])
+        
         # Pack into padded tensor
         order = torch.argsort(i, stable=True)
         i, j = i[order], j[order]
