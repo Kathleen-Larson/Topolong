@@ -15,7 +15,7 @@ def _dot(x, y, dim=-1):
     """
     Calculates dot product of two tensors (because torch.dot only works with 1D tensors)
     """
-    return torch.sum(x * y, dim=dim).unsqueeze(dim)
+    return torch.sum(x * y, dim=dim, keepdim=True)
 
 
 
@@ -96,7 +96,7 @@ Misc
 
 def GLM(X, y, compute_residuals=False):
     Xt = X.transpose(-2, -1)
-    B = torch.linalg.inv(Xt @ X) @ Xt @ y
+    B = torch.linalg.solve(Xt @ X, Xt @ y)
     if compute_residuals:
         yhat = X @ B
         res = y - yhat
