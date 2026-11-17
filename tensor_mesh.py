@@ -35,8 +35,8 @@ class TensorMesh:
         
         # Store data from mesh
         self.mesh = mesh
-        self.verts = torch.tensor(mesh.vertices, dtype=torch.double).to(self.device)
-        self.tris = torch.tensor(mesh.faces).to(self.device)
+        self.verts = torch.tensor(mesh.vertices, dtype=torch.float, device=self.device)
+        self.tris = torch.tensor(mesh.faces, device=self.device)
 
         if verts_requires_grad:
             self.verts.requires_grad = True
@@ -97,11 +97,11 @@ class TensorMesh:
         ]
         self.vert_neighbors_1hop = pad_sequence(
             [torch.cat([
-                torch.tensor([v]).to(self.device),
+                torch.tensor([v], device=self.device),
                 vert_neighbors_1hop[v][torch.where(vert_neighbors_1hop[v] != v)]
             ]) for v in range(self.nverts)],
-            batch_first=True, padding_value=-1
-        ).to(self.device)
+            batch_first=True, padding_value=-1, device=self.device
+        )
         self.vert_nneighbors_1hop = (self.vert_neighbors_1hop != -1).sum(dim=1)
 
         # Two-hop neighbors
@@ -111,11 +111,11 @@ class TensorMesh:
         ]
         self.vert_neighbors_2hop = pad_sequence(
             [torch.cat([
-                torch.tensor([v]).to(self.device),
+                torch.tensor([v], device=self.device),
                 vert_neighbors_2hop[v][torch.where(vert_neighbors_2hop[v] != v)]
             ]) for v in range(self.nverts)],
-            batch_first=True, padding_value=-1
-        ).to(self.device)
+            batch_first=True, padding_value=-1, device=self.device
+        )
         self.vert_nneighbors_2hop = (self.vert_neighbors_2hop != -1).sum(dim=1)
 
     def _compute_proximity_tree(self):
@@ -128,8 +128,8 @@ class TensorMesh:
         max_dist = 1.0
         V = self.verts.detach().cpu().numpy()
         pairs = torch.from_numpy(
-            cKDTree(V).query_pairs(max_dist, output_type='ndarray')
-        ).long().to(self.device)
+            cKDTree(V).query_pairs(max_dist, output_type='ndarray'), device=self.device
+        ).long()
 
         # Remove neighbors
         nbrs = self.vert_neighbors_1hop
@@ -142,7 +142,7 @@ class TensorMesh:
         i, j = i[order], j[order]
         counts = torch.bincount(i, minlength=self.nverts)
         starts = torch.cumsum(counts, dim=0) - counts
-        col = torch.arange(i.numel()).to(self.device) - starts[i]
+        col = torch.arange(i.numel(), device=self.device) - starts[i]
 
         self.vert_proximity_tree = torch.full(
             (self.nverts, max(counts.max().item(), 1)), -1, dtype=torch.long, device=self.device
@@ -256,8 +256,9 @@ class TensorMesh:
         arr = torch.linspace(
             start=(-stepsize * N if direction in ['both', 'in'] else 0),
             end=(stepsize * N if direction in ['both', 'out'] else 0),
-            steps=(N * 2 + 1 if direction == 'both' else N + 1)
-        ).to(self.device)
+            steps=(N * 2 + 1 if direction == 'both' else N + 1),
+            device=self.device
+        )
         arr = torch.cat(
             [arr - (stepsize / 2), (arr[-1] + (stepsize / 2)).unsqueeze(dim=0)]
         ) if offset else arr
@@ -275,7 +276,7 @@ class TensorMesh:
         # Function to check if the edges in triA intersect with triB
         def MollerTrumboreRayTriangle(A, B, eps=1e-8):
             b0, e1, e2 = B[:, 0], B[:, 1] - B[:, 0], B[:, 2] - B[:, 0]
-            hits = torch.zeros(A.shape[0], dtype=torch.bool).to(A.device)
+            hits = torch.zeros(A.shape[0], dtype=torch.bool, device=A.device)
 
             for i, j in ((0, 1), (1, 2), (2, 0)):
                 ai, eij = A[:, i], A[:, j] - A[:, i]
@@ -302,8 +303,8 @@ class TensorMesh:
         C = V[self.tris].mean(dim=1)
 
         pairs = torch.from_numpy(
-            cKDTree(C.cpu().numpy()).query_pairs(6., output_type='ndarray')
-        ).long().to(self.device)
+            cKDTree(C.cpu().numpy()).query_pairs(6., output_type='ndarray'), device=self.device
+        ).long()
         tidxs_A, tidxs_B = pairs[:, 0], pairs[:, 1]
 
         # Exclude tris that are too far apart, adjacent, or fully ripped
@@ -321,7 +322,7 @@ class TensorMesh:
         tidxs_A, tidxs_B = tidxs_A[valid], tidxs_B[valid]
 
         # Search if tris1 intersects with tris2 and vice versa
-        hits = torch.zeros(tidxs_A.shape[0], dtype=torch.bool).to(tidxs_A.device)
+        hits = torch.zeros(tidxs_A.shape[0], dtype=torch.bool, device=tidxs_A.device)
         hits |= MollerTrumboreRayTriangle(V[self.tris[tidxs_A]], V[self.tris[tidxs_B]])
         hits |= MollerTrumboreRayTriangle(V[self.tris[tidxs_B]], V[self.tris[tidxs_A]])
         
@@ -330,7 +331,7 @@ class TensorMesh:
         
         # Flag vertices of bad triangles
         bad_tris = torch.cat([tidxs_A[hits], tidxs_B[hits]])
-        bad_verts_flag = torch.zeros(self.nverts, dtype=torch.bool).to(self.device)
+        bad_verts_flag = torch.zeros(self.nverts, dtype=torch.bool, device=self.device)
         bad_verts_flag[self.tris[bad_tris].flatten()] = True
         
         if exclude_initial:
@@ -436,7 +437,8 @@ class TensorMesh:
             # Iterative Laplacian smoothing
             nbrs = self.vert_neighbors_1hop
             valid = (
-                (nbrs > -1) & (nbrs != torch.arange(self.nverts).to(self.device).unsqueeze(dim=-1))
+                (nbrs > -1)
+                & (nbrs != torch.arange(self.nverts, device=self.device).unsqueeze(dim=-1))
             ).unsqueeze(dim=-1)
             N = valid.sum(dim=1).clamp(min=1)
         
