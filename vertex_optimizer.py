@@ -190,7 +190,7 @@ class MRISPlaceSurface:
                     self._calculate_target_intensities_ggvf(n_avg_iters=5)
                 else:
                     self._calculate_target_intensities_FS(n_avg_iters=5)
-        breakpoint()
+
     def _set_fixed_vertices(self, tseg, lut):
         """
         Determines vertices that should remain fixed in initial position during surface placement.
@@ -1143,12 +1143,13 @@ class MRISPlaceSurface:
                 print('  history update skipped')
 
             # Update proximity trees
-            with torch.no_grad():
-                if 'cost_between_surface_repulsion' in self.losses_dict:
-                    self._compute_intersurface_proximity_tree()
-                if 'cost_within_surf_repulsion' in self.losses_dict:
-                    self.tmesh._compute_proximity_tree()
-            f, g = eval_fg(X.detach().clone())
+            if i < max_steps - 1:
+                with torch.no_grad():
+                    if 'cost_between_surface_repulsion' in self.losses_dict:
+                        self._compute_intersurface_proximity_tree()
+                    if 'cost_within_surf_repulsion' in self.losses_dict:
+                        self.tmesh._compute_proximity_tree()
+                f, g = eval_fg(X.detach().clone())
             
         # Finish and exit
         X = self.remove_intersections(X)

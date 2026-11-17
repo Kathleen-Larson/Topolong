@@ -193,9 +193,10 @@ class TensorMesh:
         Compute vertex normals
         """
         # Get face edges (consistent w/ surfa notation)
-        e1 = self.verts[self.tris][:, 1, :] - self.verts[self.tris][:, 0, :]
-        e2 = self.verts[self.tris][:, 2, :] - self.verts[self.tris][:, 1, :]
-        e3 = self.verts[self.tris][:, 2, :] - self.verts[self.tris][:, 0, :]
+        T = self.verts[self.tris]
+        e1 = T[:, 1, :] - T[:, 0, :]
+        e2 = T[:, 2, :] - T[:, 1, :]
+        e3 = T[:, 2, :] - T[:, 0, :]
 
         e1 = e1 / utils._norm(e1, dim=1)
         e2 = e2 / utils._norm(e2, dim=1)
@@ -212,18 +213,11 @@ class TensorMesh:
         ).squeeze()
 
         # Reshape normals/angles to be vertex encoded
-        tri_norms_vert = torch.where(
-            utils._expand(self.vert_tris, unsqueeze_dims=(-1,), repeats=(1, 1, self.ndims)) > -1,
-            self.tri_norms[self.vert_tris, ...], 0
-        )
-        
-        # Vertex normals
-        face_mask = (self.vert_tris > -1).unsqueeze(dim=-1)
-        vert_norms = torch.where(
-            (self.vert_tris > -1).unsqueeze(dim=-1), tri_norms_vert, 0
-        ).sum(dim=1)
+        valid = (self.vert_tris > -1).unsqueeze(dim=-1)
+        vert_tris = torch.where(self.vert_tris > -1, self.vert_tris, self.vert_tris[:, :1])
+        vert_norms = torch.where(valid, self.tri_norms[vert_tris], 0).sum(dim=1)
         self.vert_norms = (vert_norms / utils._norm(vert_norms, dim=1)).squeeze()
-        
+             
     def _compute_vert_tangents(self):
         """
         Compute the tangent vectors for each vertex (used in curvature and spring energy 
@@ -253,7 +247,6 @@ class TensorMesh:
         
         self._compute_vert_norms()
         self._compute_vert_tangents()
-        self._compute_edge_lengths()
 
     #-----------------------------------------------------------------------------------------------
     """
@@ -370,7 +363,6 @@ class TensorMesh:
         elif pair_type == 'prox':
             neighbors = self.vert_proximity_tree
 
-        nneighbors = neighbors.shape[1]
         valid_neighbors = neighbors > -1
         
         # Exclude ripped (if flagged)
@@ -379,16 +371,25 @@ class TensorMesh:
             valid_neighbors[self.rip_verts_flag] = False
 
         # Distance calculation
+        rows = torch.arange(self.nverts, device=self.device).unsqueeze(dim=1)
+        disps = torch.where(
+            valid_neighbors.unsqueeze(dim=-1),
+            self.verts[torch.where(valid_neighbors, neighbors, rows)] - self.verts.unsqueeze(dim=1),
+            0
+        )
+
+        """
         V0 = utils._expand(self.verts, unsqueeze_dims=(1,), repeats=(1, nneighbors, 1))
         Vn = torch.where(
             utils._expand(valid_neighbors, unsqueeze_dims=(-1,), repeats=(1, 1, self.ndims)),
             self.verts[neighbors], V0
         )
+        """
         
         if return_mask:
-            return (Vn - V0), valid_neighbors
+            return disps, valid_neighbors
         else:
-            return (Vn - V0)
+            return disps
 
     def smooth_over_neighbors(
             self, vec, mask, N_avgs=1, n_hops=1, signed=True, start_idx=0, remove_outliers=False
