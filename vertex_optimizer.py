@@ -190,7 +190,7 @@ class MRISPlaceSurface:
                     self._calculate_target_intensities_ggvf(n_avg_iters=5)
                 else:
                     self._calculate_target_intensities_FS(n_avg_iters=5)
-
+        breakpoint()
     def _set_fixed_vertices(self, tseg, lut):
         """
         Determines vertices that should remain fixed in initial position during surface placement.
@@ -430,7 +430,7 @@ class MRISPlaceSurface:
         self.target_intensities[found] = I[found, target_idxs[found]]
 
         self.target_pts = self.tmesh.verts.clone()
-        self.target_pts[found] = pts[found, target_idxs[found]].double()
+        self.target_pts[found] = pts[found, target_idxs[found]]
 
         """
         target_mesh = self.mesh.copy()
@@ -602,7 +602,7 @@ class MRISPlaceSurface:
         # Get target intensities/positions
         self.target_intensities = torch.zeros((nverts,), dtype=I.dtype, device=self.device)
         self.target_intensities[found_idx] = I_up[found_idx, target_idxs[found_idx]]
-        
+        breakpoint()
         self.target_pts = self.tmesh.verts.clone()
         self.target_pts[found_idx] = pts_up[found_idx, target_idxs[found_idx]]
         
