@@ -328,7 +328,7 @@ class TensorMesh:
         # Exclude tris that are adjacent or fully ripped
         valid = ~(
             self.tris[tidxs_A].unsqueeze(dim=2) == self.tris[tidxs_B].unsqueeze(dim=1)
-        )
+        ).flatten(1).any(dim=1)
 
         if self.rip_verts_flag is not None:
             rip_tris = self.rip_verts_flag[self.tris].all(dim=1)
@@ -338,8 +338,8 @@ class TensorMesh:
 
         # Search if tris1 intersects with tris2 and vice versa
         hits = (
-            MollerTrumboreRayTriangle(T[tidxs_A]], T[tidxs_B])
-            | MollerTrumboreRayTriangle(T[tidxs_B]], T[tidxs_A])
+            MollerTrumboreRayTriangle(T[tidxs_A], T[tidxs_B])
+            | MollerTrumboreRayTriangle(T[tidxs_B], T[tidxs_A])
         )
         if not hits.any():
             return torch.zeros(self.nverts, dtype=torch.bool).to(self.device)
