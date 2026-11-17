@@ -716,7 +716,6 @@ class MRISPlaceSurface:
         """
         Intensity constraint
         """
-        vno = 51741
         
         # Current vs. target intensity difference
         valid = self.has_valid_intensity & (~self.rip_verts_flag)
@@ -1155,152 +1154,35 @@ class MRISPlaceSurface:
         X = self.remove_intersections(X)
         self.tmesh._update_vert_properties(X)
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
-        
-    def lbfgs_optimize_torch(self, lr=1., history_size=10, max_iters=10, max_steps=50):
+
+    def sgd_optimize(self, max_steps=100, lr=0.1, max_disp=0.3, momentum=0.9, nesterov=True):
         """
-        Vertex placement with pytorch LBFGS optimizer
+        Vertex placement with SGD optimizer
         """
         self.losses_dict = self.manual_grad_losses_dict | self.autograd_losses_dict
-        n_losses = len(self.losses_dict)
+        X = self.tmesh.verts
+        v = torch.zeros_like(X)
 
-        # Closure function
-        def closure():
+        for i in range(max_steps):
+            if self.verbose:
+                print(f'Iteration {i + 1}:')
             loss_str = '' if self.verbose else None
             n_printed = 0
 
-            opt.zero_grad()
-            self.tmesh._update_vert_properties(X)
-            L_total = X.new_zeros(())
-            
-            if self.separate_loss_types:
-                # Gradient contributions w/ autograd
-                for func, weight in self.autograd_losses_dict.items():
-                    loss = eval(f'self.{func}(weight)')
-                    L_total = L_total + loss
-
-                    if self.verbose:
-                        if n_printed > 0:
-                            loss_str += ' + '
-                        loss_str += f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
-                        n_printed += 1
-                
-                # Manually do the rest (probably just intensity)
-                for func, weight in self.manual_grad_losses_dict.items():
-                    loss, grad = eval(f'self.{func}(weight)')
-                    L_total = L_total + _ManualGradTerm.apply(X, loss.detach(), grad.detach())
-
-                    if self.verbose:
-                        if n_printed > 0:
-                            loss_str += ' + '
-                        loss_str += f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
-                        n_printed += 1
-
-                # Back-propagate
-                L_total.backward()
-
-            else:
-                # Just compute everything with autograd
-                for func, weight in self.losses_dict.items():
-                    loss = eval(f'self.{func}(weight)')
-                    L_total = L_total + loss
-
-                    if self.verbose:
-                        if n_printed > 0:
-                            loss_str += ' + '
-                        loss_str += f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
-                        n_printed += 1
-
-                L_total.backward()
-
-            with torch.no_grad():
-                X.grad[self.rip_verts_flag] = 0
-
-            if self.verbose:
-                if n_losses > 1:
-                    loss_str = f'{L_total.item():>.2e} = ' + loss_str
-                if self.log is not None:
-                    with open(self.log, 'a') as log:
-                        log.write(f'{loss_str}\n')
-                else:
-                    print('Loss =', loss_str)
-            
-            return L_total
-
-        # Initialize
-        X = self.tmesh.verts
-        X_init = X.clone()
-
-        #vno = 5
-        #v = self.target_pts[vno]
-        #N = self.tmesh.vert_norms[vno].clone()
-        
-        opt = torch.optim.LBFGS(
-            [X], lr=lr,
-            history_size=history_size,
-            max_iter=max_iters,
-            line_search_fn="strong_wolfe"
-        )
-
-        # Run
-        for i in range(max_steps):
-            # Update proximity trees
+            # Reset everything for beginning of iteration
             with torch.no_grad():
                 if 'cost_between_surface_repulsion' in self.losses_dict:
                     self._compute_intersurface_proximity_tree()
                 if 'cost_within_surf_repulsion' in self.losses_dict:
                     self.tmesh._compute_proximity_tree()
-
-            if self.verbose:
-                if self.log is not None:
-                    with open(self.log, 'a') as log:
-                        log.write(f'Iteration {i + 1}:\n')
-                else:
-                    print(f'Iteration {i + 1}:')
-
-            # Closure function
-            X_prev = X.detach().clone()
-            opt.step(closure)
-
-            # Intersection removal
-            with torch.no_grad():
-                X_fix = self.remove_intersections(X.clone())
-
-                if not torch.equal(X_fix, X):
-                    X.copy_(X_fix)
-
-                state = opt.state[X]
-                if state.get('d') is not None:
-                    state['d'] = (X - X_prev).flatten().clone()
-                    state['t'] = 1.
-
-        # Update input surfa mesh
-        self.mesh.vertices = self.tmesh.verts.detach().cpu()
-
-    def sgd_optimize(self, max_steps=100, lr=0.1, momentum=0.9, nesterov=True):
-        """
-        Vertex placement with SGD optimizer
-        """
-        X = self.tmesh.verts
-        opt = torch.optim.SGD([X], lr=lr, momentum=momentum, nesterov=nesterov)
-
-        self.losses_dict = self.manual_grad_losses_dict | self.autograd_losses_dict
-        n_losses = len(self.losses_dict)
-
-        for i in range(max_steps):
-            if self.verbose:
-                print(f'Iteration {i + 1}:')
             
-            opt.zero_grad()
+            X.grad = None
             self.tmesh._update_vert_properties(X)
+            L_total = X.new_zeros(())
 
-            loss_str = '' if self.verbose else None
-            n_printed = 0
-
-            L_total = 0.
-            #for func, weight in self.losses_dict.items():
+            # Iterate through losses
             for func, weight in self.autograd_losses_dict.items():
-                loss = eval(f'self.{func}(weight)')
-                L_total = L_total + loss
+                L_total = L_total + getattr(self, func)(weight)
 
                 if self.verbose:
                     if n_printed > 0:
@@ -1308,22 +1190,39 @@ class MRISPlaceSurface:
                     loss_str += f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
                     n_printed += 1
 
+            for func, weight in self.manual_grad_losses_dict.items():
+                loss, grad = getattr(self, func)(weight)
+                L_total = L_total + _ManualGradTerm.apply(X, loss.detach(), grad.detach())
+
+                if self.verbose:
+                    if n_losses > 0:
+                        loss_str += ' + '
+                    loss_str = f'{L_total.item():>.2e} = ' + loss_str
+                    n_printed += 1
+                
             L_total.backward()
 
-            for func, weight in self.autograd_losses_dict.items():
-                with torch.no_grad():
-                    grad = eval(f'self.{func}(weight)')
-                    X.grad = X.grad + grad
-            
             with torch.no_grad():
-                X.grad[self.rip_verts_flag] = 0
-
-            opt.step()
+                # Compute step (normalize s.t. median moving vert steps lr * max_disp, then cap)
+                g = X.grad
+                g[self.rip_verts_flag] = 0
+                gn = g.norm(dim=-1. keepdim=True)
+                step = -lr * max_disp * g / gn[~self.rip_verts_flag].median().clamp(min=1e-12)
+                v = momentum * v + step
+                v = v * (max_disp / v.norm(dim=-1, keepdim=True).clamp(min=max_disp))
+                
+                # Remove self intersections
+                X_new = self.remove_intersections(X + v)
+                v = torch.where(X_new != (X + v)).any(dim=-1, keepdim=True), 0, v)
+                X.copy_(X_new)
 
             if self.verbose:
                 if n_losses > 1:
                     loss_str = f'{L_total.item():>.2e} = ' + loss_str
                 print('Loss =', loss_str)
+                print(f'  step {i}: loss {L_total.item():.2e}, '
+                      f'median disp {v.norm(dim=-1)[~self.rip_verts_flag].median():.3f} mm')
+
             
         # Update input surfa mesh
         self.mesh.vertices = self.tmesh.verts.detach().cpu()
