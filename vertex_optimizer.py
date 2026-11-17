@@ -76,7 +76,7 @@ class MRISPlaceSurface:
         if l_intensity is not None and l_intensity > 0:
             self.manual_grad_losses_dict['cost_intensity'] = l_intensity
         if l_between_surf is not None and l_between_surf > 0:
-            self.manual_grad_losses_dict['cost_surface_repulsion'] = l_between_surf
+            self.manual_grad_losses_dict['cost_between_surface_repulsion'] = l_between_surf
 
         self.autograd_losses_dict = {}
         if l_curvature is not None and l_curvature > 0:
@@ -118,7 +118,7 @@ class MRISPlaceSurface:
         )
 
         # Repulsive force?
-        if 'cost_surface_repulsion' in self.manual_grad_losses_dict.keys():
+        if 'cost_between_surface_repulsion' in self.manual_grad_losses_dict.keys():
             mesh_repulse = self.mesh.copy() if mesh_repulse is None else sf.load_mesh(mesh_repulse)
             self.repulsion_kdtree = cKDTree(mesh_repulse.vertices)
 
@@ -767,7 +767,7 @@ class MRISPlaceSurface:
 
             return weight * (1. / n_valid) * cost
 
-    def cost_surface_repulsion(self, weight=1., thresh=1.0, max_ratio=0.8):
+    def cost_between_surface_repulsion(self, weight=1., thresh=1.0, max_ratio=0.8):
         """
         Repulsion energy cost (between two surfaces)
         
@@ -830,9 +830,11 @@ class MRISPlaceSurface:
         repulse_k = 1.
         repulse_e = 0.25
 
+        """
         # Update proximity tree
         with torch.no_grad():
             self.tmesh._compute_proximity_tree()
+        """
         
         # Distance between vertices in each other's proximity trees
         disps, valid = self.tmesh.neighbor_displacements(
@@ -1011,8 +1013,10 @@ class MRISPlaceSurface:
 
         # Initialize
         with torch.no_grad():
-            self._compute_intersurface_proximity_tree()
-	    self.tmesh._compute_proximity_tree()
+            if 'cost_between_surface_repulsion' in self.losses_dict():
+                self._compute_intersurface_proximity_tree()
+            if 'cost_within_surf_repulsion' in self.losses_dict():
+                self.tmesh._compute_proximity_tree()
 
         X = self.tmesh.verts
         f, g = eval_fg(X.detach().clone())
@@ -1140,8 +1144,10 @@ class MRISPlaceSurface:
 
             # Update proximity trees
             with torch.no_grad():
-                self._compute_intersurface_proximity_tree()
-		self.tmesh._compute_proximity_tree()
+                if 'cost_between_surface_repulsion' in self.losses_dict():
+		    self._compute_intersurface_proximity_tree()
+                if 'cost_within_surf_repulsion' in self.losses_dict():
+                    self.tmesh._compute_proximity_tree()
 
         # Finish and exit
         X = self.remove_intersections(X)
@@ -1236,9 +1242,11 @@ class MRISPlaceSurface:
         # Run
         for i in range(max_steps):
             # Update proximity trees
-	    with torch.no_grad():
-                self._compute_intersurface_proximity_tree()
-                self.tmesh._compute_proximity_tree()
+            with torch.no_grad():
+                if 'cost_between_surface_repulsion' in self.losses_dict():
+		    self._compute_intersurface_proximity_tree()
+                if 'cost_within_surf_repulsion' in self.losses_dict():
+                    self.tmesh._compute_proximity_tree()
 
             if self.verbose:
                 if self.log is not None:
