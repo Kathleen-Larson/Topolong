@@ -637,14 +637,16 @@ class MRISPlaceSurface:
         max_dist = np.min(
             np.diff(np.stack(self.mesh.bbox()), axis=0)
         ).item() * self.bsurf_prox_ratio
-        dist, idx = self.repulsion_kdtree.query(
+        _, idx = self.repulsion_kdtree.query(
             self.tmesh.verts.detach().cpu().numpy(), k=64, distance_upper_bound=max_dist, workers=-1
         )
-        idx = np.where(np.isinf(dist), -1, idx)
-        idx = idx[:, (idx >= 0).any(axis=0)]
+        missing = idx == self.repulsion_kdtree.n
+        idx[missing] = -1
 
         # Store
-        self.intersurface_proximity_tree = torch.from_numpy(idx).long().to(self.device)
+        self.intersurface_proximity_tree = torch.as_tensor(
+            idx[:, :(~missing).sum(axis=1).max()], device=self.device
+        )
         self.intersurface_nproximity = (self.intersurface_proximity_tree != -1).sum(dim=1)
         self.max_intersurface_nproximity = self.intersurface_proximity_tree.shape[1]
 
