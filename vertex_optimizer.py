@@ -104,8 +104,7 @@ class MRISPlaceSurface:
             verts_requires_grad=True,
             compute_proximity_tree=(
                 'cost_within_surf_repulsion' in self.autograd_losses_dict.keys()
-            ),
-            proximity_ratio=wsurf_prox_ratio,
+            )
         )
         
         # Target curvature?
@@ -191,7 +190,7 @@ class MRISPlaceSurface:
                     self._calculate_target_intensities_ggvf(n_avg_iters=5)
                 else:
                     self._calculate_target_intensities_FS(n_avg_iters=5)
-        breakpoint()
+
     def _set_fixed_vertices(self, tseg, lut):
         """
         Determines vertices that should remain fixed in initial position during surface placement.
