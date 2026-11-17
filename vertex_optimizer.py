@@ -1013,9 +1013,9 @@ class MRISPlaceSurface:
 
         # Initialize
         with torch.no_grad():
-            if 'cost_between_surface_repulsion' in self.losses_dict():
+            if 'cost_between_surface_repulsion' in self.losses_dict:
                 self._compute_intersurface_proximity_tree()
-            if 'cost_within_surf_repulsion' in self.losses_dict():
+            if 'cost_within_surf_repulsion' in self.losses_dict:
                 self.tmesh._compute_proximity_tree()
 
         X = self.tmesh.verts
@@ -1125,14 +1125,6 @@ class MRISPlaceSurface:
             Xt_fix, idxs = self.remove_intersections(Xt.clone(), return_idxs=True)
             frozen = None
 
-            # Update proximity trees
-            with torch.no_grad():
-                if 'cost_between_surface_repulsion' in self.losses_dict():
-                    self._compute_intersurface_proximity_tree()
-                if 'cost_within_surf_repulsion' in self.losses_dict():
-                    self.tmesh._compute_proximity_tree()
-
-
             if not torch.equal(Xt_fix, Xt):
                 Xt = Xt_fix
                 frozen = idxs
@@ -1150,6 +1142,14 @@ class MRISPlaceSurface:
             if sy <= 1e-10:
                 print('  history update skipped')
 
+            # Update proximity trees
+            with torch.no_grad():
+                if 'cost_between_surface_repulsion' in self.losses_dict:
+                    self._compute_intersurface_proximity_tree()
+                if 'cost_within_surf_repulsion' in self.losses_dict:
+                    self.tmesh._compute_proximity_tree()
+            f, g = eval_fg(X.detach.clone())
+            
         # Finish and exit
         X = self.remove_intersections(X)
         self.tmesh._update_vert_properties(X)
@@ -1244,9 +1244,9 @@ class MRISPlaceSurface:
         for i in range(max_steps):
             # Update proximity trees
             with torch.no_grad():
-                if 'cost_between_surface_repulsion' in self.losses_dict():
-		    self._compute_intersurface_proximity_tree()
-                if 'cost_within_surf_repulsion' in self.losses_dict():
+                if 'cost_between_surface_repulsion' in self.losses_dict:
+                    self._compute_intersurface_proximity_tree()
+                if 'cost_within_surf_repulsion' in self.losses_dict:
                     self.tmesh._compute_proximity_tree()
 
             if self.verbose:
