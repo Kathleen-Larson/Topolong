@@ -314,7 +314,7 @@ class TensorMesh:
 
         d = 2. * dist.max().item()
         if d > 6.:
-            breakpoint()
+            print("big triangle :(")
 
         pairs = torch.as_tensor(
             cKDTree(C.cpu().numpy()).query_pairs(d, output_type='ndarray'), device=self.device
@@ -338,8 +338,8 @@ class TensorMesh:
 
         # Search if tris1 intersects with tris2 and vice versa
         hits = (
-            MollerTrumboreRayTriangle(V[self.tris[tidxs_A]], V[self.tris[tidxs_B]])
-            | MollerTrumboreRayTriangle(V[self.tris[tidxs_B]], V[self.tris[tidxs_A]])
+            MollerTrumboreRayTriangle(T[tidxs_A]], T[tidxs_B])
+            | MollerTrumboreRayTriangle(T[tidxs_B]], T[tidxs_A])
         )
         if not hits.any():
             return torch.zeros(self.nverts, dtype=torch.bool).to(self.device)
