@@ -1200,12 +1200,13 @@ class MRISPlaceSurface:
             L_total.backward()
 
             with torch.no_grad():
-                # Compute step (normalize s.t. median moving vert steps lr * max_disp, then cap)
+                # Compute step
                 g = X.grad
                 g[self.rip_verts_flag] = 0
-                gn = g.norm(dim=-1, keepdim=True)
-                step = -lr * max_disp * g / gn[~self.rip_verts_flag].median().clamp(min=1e-12)
-                v = momentum * v + step
+                if i == 0:
+                    gn = g.norm(dim=-1)[~self.rip_verts_flag].median().clamp(min=1e-12)
+                    scale = lr * max_disp / gn
+                v = momentum * v - scale * g
                 v = v * (max_disp / v.norm(dim=-1, keepdim=True).clamp(min=max_disp))
                 
                 # Remove self intersections

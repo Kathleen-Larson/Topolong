@@ -305,9 +305,7 @@ class TensorMesh:
         dist = (2. / 3.) * (T[:, [1, 2, 0]] - T).norm(dim=-1).max(dim=1).values
         C = T.mean(dim=1)
 
-        d = 2. * dist.max().item()
-        if d > 6.:
-            print("big triangle :(")
+        d = min(2. * dist.max().item(), 6.)
 
         pairs = torch.as_tensor(
             cKDTree(C.cpu().numpy()).query_pairs(d, output_type='ndarray'), device=self.device

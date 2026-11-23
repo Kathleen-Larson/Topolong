@@ -51,8 +51,8 @@ class TensorImage:
         self.dtype = self.data.dtype
         
         # Spatial info
-        self.voxsize = torch.tensor(ref_image.geom.voxsize).to(self.device)
-        self.shape = torch.tensor(ref_image.geom.shape, dtype=self.voxsize.dtype).to(self.device)
+        self.voxsize = torch.tensor(ref_image.geom.voxsize, dtype=torch.float, device=self.device)
+        self.shape = torch.tensor(ref_image.geom.shape, dtype=torch.float, device=self.device)
 
         self.transform_dict = {}
         self.transform_dict['vox2world'] = {
