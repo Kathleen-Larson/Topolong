@@ -26,8 +26,8 @@ momentum = 0.5
 L_crv = 1.0
 L_int = 0.2
 L_spr = 0.3
-L_wsf = 5.0 #5.0
-L_bsf = 5.0 #5.0
+L_wsf = 1.0 #5.0
+L_bsf = 1.0 #5.0
 
 # Load data
 data_dir = 'data/'
