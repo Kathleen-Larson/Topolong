@@ -783,15 +783,11 @@ class MRISPlaceSurface:
             self._compute_intersurface_proximity_tree()
         """
         # Get distances between each vertex and another mesh
-        valid_verts = self.intersurface_proximity_tree > -1
-        valid_verts &= (~self.rip_verts_flag)[self.intersurface_proximity_tree]
-
-        ndims = self.tmesh.ndims
-        n_prox_verts = self.intersurface_proximity_tree.shape[1]
-        sgn = -1.0 # check this
+        tree = self.intersurface_proximity_tree
+        valid_verts = tree > -1
+        valid_verts &= (~self.rip_verts_flag)[tree]
         
         # Distance calculation
-        tree = self.intersurface_proximity_tree
         disps = torch.where(
             valid_verts.unsqueeze(dim=-1),
             self.tmesh.verts.unsqueeze(dim=1) - self.tmesh_repulsion.verts[tree],
@@ -802,7 +798,7 @@ class MRISPlaceSurface:
         Nn = self.tmesh_repulsion.vert_norms[tree]
         dot = (disps * Nn).sum(dim=-1)
 
-        valid = (sgn * dot <= thresh) & valid_verts
+        valid = (-1.0 * dot <= thresh) & valid_verts
         num = valid.sum(dim=1)
         dot = dot.clamp(min=-max_ratio, max=max_ratio)
 
@@ -1160,6 +1156,10 @@ class MRISPlaceSurface:
         X = self.tmesh.verts
         v = torch.zeros_like(X)
 
+        with torch.no_grad():
+            if 'cost_between_surface_repulsion' in self.losses_dict:
+                self._compute_intersurface_proximity_tree()
+        
         for i in range(max_steps):
             if self.verbose:
                 print(f'Iteration {i + 1}:')
@@ -1168,8 +1168,6 @@ class MRISPlaceSurface:
 
             # Reset everything for beginning of iteration
             with torch.no_grad():
-                if 'cost_between_surface_repulsion' in self.losses_dict:
-                    self._compute_intersurface_proximity_tree()
                 if 'cost_within_surf_repulsion' in self.losses_dict:
                     self.tmesh._compute_proximity_tree()
             
