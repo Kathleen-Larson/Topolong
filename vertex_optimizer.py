@@ -148,7 +148,7 @@ class MRISPlaceSurface:
                 utils.fatal('[MRISPlaceSurface] error: must provide label map if using intensity '
                             'loss')
             image = sf.load_volume(image)
-            self.timage = TensorImage(image, do_smoothing=True, device=device)
+            self.timage = TensorImage(image, device=device)
 
             # Do masking
             self._generate_surface_mask(tseg, lut)

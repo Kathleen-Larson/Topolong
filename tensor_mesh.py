@@ -27,7 +27,6 @@ class TensorMesh:
         Triangular mesh topology represented by tensors of vertices and faces. This class is based
         almost entirely on surfa.mesh, but with tensors instead of numpy arrays for gpu support.
         """
-        breakpoint()
         self.device = torch.device(
             'cuda' if device == 'gpu' and torch.cuda.is_available() else 'cpu'
         ) if not isinstance(device, torch.device) else device
@@ -230,7 +229,7 @@ class TensorMesh:
         vec2  = torch.linalg.cross(N, torch.stack([N[..., 1], -N[..., 2], N[..., 0]], dim=-1))
 
         # Tangents
-        e1 = torch.where(torch.linalg.norm(vec1, dim=-1) < 0.001, vec2, vec1)
+        e1 = torch.where(torch.linalg.norm(vec1, keepdims=True, dim=-1) < 0.001, vec2, vec1)
         e2 = torch.linalg.cross(N, e1)
 
         # Normalize

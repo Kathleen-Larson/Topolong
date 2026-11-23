@@ -15,7 +15,7 @@ from vertex_optimizer import MRISPlaceSurface
 Right now this is attempting to replicate lh.orig-->lh.white.preaparc (mris_place_surface)
 """
 
-device=torch.device('cuda')
+device = 'gpu'
 
 # Optimizer input params
 lr = 1.
