@@ -21,8 +21,6 @@ class TensorImage:
                  device=None,
                  is_talairach=True,
                  compute_gradient=False,
-                 do_smoothing=False,
-                 smoothing_sigma=1.
     ):
         self.device = torch.device(
             'cuda' if device == 'gpu' and torch.cuda.is_available() else 'cpu'
@@ -204,7 +202,7 @@ class TensorImage:
         )
 
         # Apply
-        vol = smooth_filter(self.data.unsqueeze(dim=0).unsqueeze(dim=0)).squeeze()
+        vol = smooth_filter(img.unsqueeze(dim=0).unsqueeze(dim=0)).squeeze()
         return vol
 
     def transform(self, coords, geom):
