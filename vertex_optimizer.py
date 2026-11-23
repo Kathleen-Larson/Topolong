@@ -791,15 +791,15 @@ class MRISPlaceSurface:
         sgn = -1.0 # check this
         
         # Distance calculation
-        V0 = utils._expand(self.tmesh.verts, unsqueeze_dims=(1,), repeats=(1, n_prox_verts, 1))
-        Vn = torch.where(
-            utils._expand(valid_verts, unsqueeze_dims=(-1,), repeats=(1, 1, ndims)),
-            self.tmesh_repulsion.verts[self.intersurface_proximity_tree], V0
+        tree = self.intersurface_proximity_tree
+        disps = torch.where(
+            valid_verts.unsqueeze(dim=-1),
+            self.tmesh.verts.unsqueeze(dim=1) - self.tmesh_repulsion.verts[tree],
+            0
         )
-        disps = V0 - Vn
 
         # Dot product between displacement and normals
-        Nn = self.tmesh_repulsion.vert_norms[self.intersurface_proximity_tree]
+        Nn = self.tmesh_repulsion.vert_norms[tree]
         dot = (disps * Nn).sum(dim=-1)
 
         valid = (sgn * dot <= thresh) & valid_verts
