@@ -1141,13 +1141,10 @@ class MRISPlaceSurface:
             if sy <= 1e-10:
                 print('  history update skipped')
 
-            # Update proximity trees
-            if i < max_steps - 1:
+            # Update within-surface proximity tree
+            if i < max_steps - 1 and 'cost_within_surf_repulsion' in self.losses_dict:
                 with torch.no_grad():
-                    if 'cost_between_surface_repulsion' in self.losses_dict:
-                        self._compute_intersurface_proximity_tree()
-                    if 'cost_within_surf_repulsion' in self.losses_dict:
-                        self.tmesh._compute_proximity_tree()
+                    self.tmesh._compute_proximity_tree()
                 f, g = eval_fg(X.detach().clone())
             
         # Finish and exit
