@@ -451,6 +451,6 @@ class TensorMesh:
             N = valid.sum(dim=1).clamp(min=1)
         
             for _ in range(n_iters):
-                X[idxs] = torch.where(mask, (X[nbrs] * valid).sum(dim=1) / N, X)
+                X[idxs] = (X[nbrs] * valid).sum(dim=1) / N
 
         return X
