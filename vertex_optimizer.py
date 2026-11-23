@@ -1155,10 +1155,6 @@ class MRISPlaceSurface:
         self.losses_dict = self.manual_grad_losses_dict | self.autograd_losses_dict
         X = self.tmesh.verts
         v = torch.zeros_like(X)
-
-        with torch.no_grad():
-            if 'cost_between_surface_repulsion' in self.losses_dict:
-                self._compute_intersurface_proximity_tree()
         
         for i in range(max_steps):
             if self.verbose:
@@ -1168,6 +1164,8 @@ class MRISPlaceSurface:
 
             # Reset everything for beginning of iteration
             with torch.no_grad():
+                if 'cost_between_surface_repulsion' in self.losses_dict:
+                    self._compute_intersurface_proximity_tree()
                 if 'cost_within_surf_repulsion' in self.losses_dict:
                     self.tmesh._compute_proximity_tree()
             
