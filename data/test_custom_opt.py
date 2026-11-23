@@ -18,80 +18,59 @@ Right now this is attempting to replicate lh.orig-->lh.white.preaparc (mris_plac
 device=torch.device('cuda')
 
 # Optimizer input params
+lr = 1.
 n_iters = 50
+max_disp = 0.3
+momentum = 0.5
 
 L_crv = 1.0
 L_int = 0.2
 L_spr = 0.3
-L_srp = 5.0
-L_vrp = 5.0
-
-v_prox = 0.05
-s_prox = 0.05 #0.05
-
-borders_dict = {
-    'border_hi': 67.4082,
-    'border_lo': 44.2246,
-    'outside_hi': 61.6123,
-    'outside_lo': 10,
-    'inside_hi': 104.144,
-}
+L_wsf = 5.0 #5.0
+L_bsf = 5.0 #5.0
 
 # Load data
 data_dir = 'data/'
 
 image_fname = 'data/brain.finalsurfs.mgz'
-image = sf.load_volume(image_fname)
-timage = TensorImage(image)
-
 aseg_fname = 'data/aseg.presurf.mgz'
-aseg = sf.load_volume(aseg_fname)
-
-mesh_moving_fname = 'data/lh.orig'
-mesh_moving = sf.load_mesh(mesh_moving_fname)
-
-mesh_repulse = mesh_moving.copy()
-
+wm_fname = 'data/wm.mgz'
 lut_fname = 'data/ASegStatsLUT.txt'
-lut = sf.load_label_lookup(lut_fname)
+mesh_moving_fname = 'data/lh.orig'
 
 # Run optimizer
 opt = MRISPlaceSurface(
     insurf=mesh_moving_fname,
     image=image_fname,
+    mesh_repulse=mesh_repulse_fname,
     seg=aseg_fname,
-    lut=lut,
+    lut=lut_fname,
     surf='pial',
     l_curvature=L_crv,
     l_intensity=L_int,
     l_nspring=L_spr,
     l_tspring=L_spr,
-    l_within_surf=L_vrp,
-    l_between_surf=L_srp,    
-    borders_dict=borders_dict,
+    l_within_surf=L_wsf,
+    l_between_surf=L_bsf,
     use_ggvf=True,
+    device=device,
     verbose=True
 )
 
 print('Initialization complete')
 t = time.time()
 
-opt.lbfgs_optimize(max_steps=n_iters, max_iters=10, line_search_fn='strong_wolfe')
+#opt.lbfgs_optimize(max_steps=n_iters, max_iters=10, line_search_fn='strong_wolfe')
+opt.sgd_optimize(max_steps=n_iters, lr=lr, max_disp=max_disp, momentum=momentum)
+
 print(f'optimization time: {(time.time() - t):>.0f} s')
 
 mesh_opt = opt.mesh
 
-valid = ~opt.rip_verts_flag.cpu()
-disp = np.sqrt(np.sum((mesh_moving.vertices - mesh_opt.vertices) ** 2, axis=1))[valid]
-
-print(f'mean displacement: {disp.mean():.3f} +- {disp.std():.3f} mm')
-print(f'max displacement: {disp.max():.3f} mm')
-
 # Save results
 output_fname = (
-    f'data/lh.pial.n_iters_{n_iters}.' +
-    f'int_{L_int:.0e}.curv_{L_crv:.0e}.spring_{L_spr:.0e}.vrep_{L_vrp:.0e}.srep_{L_srp:.0e}.' +
-    f'vert_prox_ratio_{v_prox:.0e}.surf_prox_ratio_{s_prox:.0e}'
+    f'data/lh.pial.n_iters_{n_iters}.sgd' +
+    f'int_{L_int:.0e}.curv_{L_crv:.0e}.spring_{L_spr:.0e}.vrep_{L_wsf:.0e}.srep_{L_wsf:.0e}'
 )
 
 mesh_opt.save(output_fname)
