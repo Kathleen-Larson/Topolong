@@ -42,7 +42,7 @@ mesh_moving_fname = 'data/lh.orig'
 opt = MRISPlaceSurface(
     insurf=mesh_moving_fname,
     image=image_fname,
-    mesh_repulse=mesh_repulse_fname,
+    mesh_repulse=mesh_moving_fname,
     seg=aseg_fname,
     lut=lut_fname,
     surf='pial',
@@ -69,8 +69,8 @@ mesh_opt = opt.mesh
 
 # Save results
 output_fname = (
-    f'data/lh.pial.n_iters_{n_iters}.sgd' +
-    f'int_{L_int:.0e}.curv_{L_crv:.0e}.spring_{L_spr:.0e}.vrep_{L_wsf:.0e}.srep_{L_wsf:.0e}'
+    f'data/lh.pial.n_iters_{n_iters}.sgd.' +
+    f'int_{L_int:.0e}.curv_{L_crv:.0e}.spring_{L_spr:.0e}.vrep_{L_wsf:.0e}.srep_{L_bsf:.0e}'
 )
 
 mesh_opt.save(output_fname)
