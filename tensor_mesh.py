@@ -440,23 +440,17 @@ class TensorMesh:
         with torch.no_grad():
             X = (self.verts if X is None else X).detach().clone()
 
-            # Get mask of valid vertices
-            mask = torch.zeros(self.nverts, dtype=torch.bool, device=self.device)
-            mask[idxs if idxs is not None else slice(None)] = True
-
+            # Vertices to smooth
+            idxs = torch.arange(self.nverts, device=self.device) if idxs is None else idxs
             if exclude_ripped and self.rip_verts_flag is not None:
-                mask &= ~self.rip_verts_flag
-            mask = mask.unsqueeze(dim=-1)
+                idxs = idxs[~self.rip_verts_flag[idxs]]
 
             # Iterative Laplacian smoothing
-            nbrs = self.vert_neighbors_1hop
-            valid = (
-                (nbrs > -1)
-                & (nbrs != torch.arange(self.nverts, device=self.device).unsqueeze(dim=-1))
-            ).unsqueeze(dim=-1)
+            nbrs = self.vert_neighbors_1hop[idxs]
+            valid = ((nbrs > -1) & (nbrs != idxs.unsqueeze(dim=-1))).unsqueeze(dim=-1)
             N = valid.sum(dim=1).clamp(min=1)
         
             for _ in range(n_iters):
-                X = torch.where(mask, (X[nbrs] * valid).sum(dim=1) / N, X)
+                X[idxs] = torch.where(mask, (X[nbrs] * valid).sum(dim=1) / N, X)
 
         return X
