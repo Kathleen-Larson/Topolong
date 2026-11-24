@@ -735,7 +735,7 @@ class MRISPlaceSurface:
         sgn[valid] = torch.where(g * N[valid].detach()).sum(dim=-1, keepdim=True) < 0, -1., 1.)
         
         # Project differences onto normal and smooth over neighbors
-        N_proj = delta_I.clamp(min=-max_delta, max=max_delta) * N
+        N_proj = sgn * delta_I.clamp(min=-max_delta, max=max_delta) * N
 
         # Compute loss/gradient
         #cost = (delta_I ** 2).sum()
