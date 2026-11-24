@@ -725,46 +725,27 @@ class MRISPlaceSurface:
         I[valid] = self.timage.interpolate(self.tmesh.verts[valid], geom='surf2vox').transpose(0, 1)
         delta_I = (self.target_intensities - I)
 
-        # Get sign
-        #g = self.ggvf.interpolate(self.tmesh.verts[valid], geom='surf2vox').transpose(0, 1)
-        #g = g @ (self.timage.transform_dict['vox2surf']['rotation'].T).to(g.dtype)
+        # Calculate sign
+        R = self.timage.transform_dict['vox2surf']['rotation']
+        V = self.tmesh.verts
+        g = self.ggvf.interpolate(V[valid].detach()).transpose(0, 1).to(R.dtype) @ R.T
 
-        #sgn = torch.ones_like(delta_I)
-        """
-        sgn[valid] = torch.where(
-            (g * self.tmesh.vert_norms[valid]).sum(dim=-1, keepdim=True) > 0, -1., 1.
-        )
-        """
-        """
-        nbr = self.tmesh.vert_neighbors_1hop
-        ok = nbr >= 0
-        s = sgn.squeeze(-1)
-        nbr_mean = (s[nbr.clamp(min=0)] * ok).sum(dim=1) / ok.sum(dim=1)
-        print('sign disagrees with neighbors:', ((s * nbr_mean) < 0)[valid].float().mean().item())
-        """
-        if self.separate_loss_types:
-            # Project differences onto normal and smooth over neighbors
-            N_proj = delta_I.clamp(min=-max_delta, max=max_delta) * self.tmesh.vert_norms
+        N = self.tmesh.vert_norms
+        sgn = torch.ones_like(delta_I)
+        sgn[valid] = torch.where(g * N[valid].detach()).sum(dim=-1, keepdim=True) < 0, -1., 1.)
+        
+        # Project differences onto normal and smooth over neighbors
+        N_proj = delta_I.clamp(min=-max_delta, max=max_delta) * N
 
-            # Compute loss/gradient
-            #cost = (delta_I ** 2).sum()
-            cost = torch.where(
-                delta_I.abs() <= max_delta,
-                0.5 * (delta_I.abs() ** 2),
-                max_delta * (delta_I.abs() - 0.5 * max_delta)
-            ).sum()
+        # Compute loss/gradient
+        #cost = (delta_I ** 2).sum()
+        cost = torch.where(
+            delta_I.abs() <= max_delta,
+            0.5 * (delta_I.abs() ** 2),
+            max_delta * (delta_I.abs() - 0.5 * max_delta)
+        ).sum()
 
-            return weight * (1. / n_valid) * cost, weight * N_proj / n_valid
-
-        else:
-            # Compute loss
-            cost = torch.where(
-                delta_I.abs() <= max_delta,
-                0.5 * (delta_I.abs() ** 2),
-                max_delta * (delta_I.abs() - 0.5 * max_delta)
-            ).sum()
-
-            return weight * (1. / n_valid) * cost
+        return weight * (1. / n_valid) * cost, weight * N_proj / n_valid
 
     def cost_between_surface_repulsion(self, weight=1., thresh=1.0, max_ratio=40.): #0.8):
         """
