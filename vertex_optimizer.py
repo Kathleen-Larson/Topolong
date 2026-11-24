@@ -732,7 +732,7 @@ class MRISPlaceSurface:
 
         N = self.tmesh.vert_norms
         sgn = torch.ones_like(delta_I)
-        sgn[valid] = torch.where(g * N[valid].detach()).sum(dim=-1, keepdim=True) < 0, -1., 1.)
+        sgn[valid] = torch.where((g * N[valid].detach()).sum(dim=-1, keepdim=True) > 0, -1., 1.)
         
         # Project differences onto normal and smooth over neighbors
         N_proj = sgn * delta_I.clamp(min=-max_delta, max=max_delta) * N
