@@ -1171,6 +1171,10 @@ class MRISPlaceSurface:
                         f'{loss.item():>.2e} ({"_".join(func.split("_")[1:])})'
                     n_printed += 1
 
+                 # Store intensity gradient to compute step size
+                 if func == 'cost_intensity' and i == 0:
+                    g_int = grad.detach().clone()
+
             L_total.backward()
 
             with torch.no_grad():
@@ -1178,7 +1182,8 @@ class MRISPlaceSurface:
                 g = X.grad
                 g[self.rip_verts_flag] = 0
                 if i == 0:
-                    gn = g.norm(dim=-1)[~self.rip_verts_flag].median().clamp(min=1e-12)
+                    #gn = g.norm(dim=-1)[~self.rip_verts_flag].median().clamp(min=1e-12)
+                    gn = g_int.norm(dim=-1)[~self.rip_verts_flag].median().clamp(min=1e-12)
                     scale = lr * max_disp / gn
                 v = momentum * v - scale * g
                 v = v * (max_disp / v.norm(dim=-1, keepdim=True).clamp(min=max_disp))
