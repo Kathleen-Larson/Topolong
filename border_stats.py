@@ -114,19 +114,6 @@ class BorderStatsGenerator:
         gm_pial = gm_mask * pial_border
         csf_pial = csf_mask * pial_border
 
-        """
-        # Now compare to using wm.mgz
-        wm_mask_2 = torch.where(self.wm > 5, 1, 0)
-        gm_mask_2 = torch.where(self.wm <= 5, 1, 0)
-
-        white_border_2 = torch.logical_and(
-            utils.apply_convolution(wm_mask_2, dilate_filter) > 0,
-            utils.apply_convolution(gm_mask_2, dilate_filter) > 0
-        ).to(torch.int)
-
-        wm_white_2 = wm_mask_2 * white_border_2
-        gm_white_2 = gm_mask_2 * white_border_2
-        """
         return wm_white, gm_white, gm_pial, csf_pial
         
         
@@ -172,7 +159,7 @@ class BorderStatsGenerator:
         gm_pial_max = gm_white_mean - gm_white_std
         gm_max = wm_white_mean - wm_white_std
         gm_mid = (gm_max + gm_pial_min) / 2
-        csf_max = gm_white_mean - max(0.5, self.var_sigma * gm_white_std)
+        csf_max = gm_white_mean - max(0.5, self.var_sigma - 1.) * gm_white_std
         
         # Do sanity checks
         def sanity_check(val, targ):
