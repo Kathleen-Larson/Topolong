@@ -766,7 +766,7 @@ class MRISPlaceSurface:
 
             return weight * (1. / n_valid) * cost
 
-    def cost_between_surface_repulsion(self, weight=1., thresh=1.0, max_ratio=0.8):
+    def cost_between_surface_repulsion(self, weight=1., thresh=1.0, max_ratio=40.): #0.8):
         """
         Repulsion energy cost (between two surfaces)
         
@@ -788,17 +788,17 @@ class MRISPlaceSurface:
         valid_verts &= (~self.rip_verts_flag)[tree]
         
         # Distance calculation
+        verts = self.tmesh.verts.unsqueeze(dim=1)
+        valid_verts &= ((verts - self.tmesh_repulsion.verts[tree]).norm(dim=-1) <= 1.0)
         disps = torch.where(
-            valid_verts.unsqueeze(dim=-1),
-            self.tmesh.verts.unsqueeze(dim=1) - self.tmesh_repulsion.verts[tree],
-            0
+            valid_verts.unsqueeze(dim=-1), verts - self.tmesh_repulsion.verts[tree], 0
         )
 
         # Dot product between displacement and normals
         Nn = self.tmesh_repulsion.vert_norms[tree]
         dot = (disps * Nn).sum(dim=-1)
 
-        valid = (-1.0 * dot <= thresh) & valid_verts
+        valid = (dot <= thresh) & valid_verts # (-1.0 * dot <= thresh) & valid_verts
         num = valid.sum(dim=1)
         dot = dot.clamp(min=-max_ratio, max=max_ratio)
 
@@ -813,7 +813,7 @@ class MRISPlaceSurface:
         grad_smoothed = self.tmesh.smooth_over_neighbors(
             grad, mask=(~self.rip_verts_flag), N_avgs=5, n_hops=1, signed=True
         )
-
+        
         return weight * (1. / n_valid) * repulsion.sum(), weight * (1. / n_valid) * grad_smoothed
     
     def cost_within_surf_repulsion(self, weight=1.):
